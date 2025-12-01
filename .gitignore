@@ -1,0 +1,35 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Queues (working data)
+commands.jsonl
+responses.jsonl
+
+# Session (working data)
+.session
+
+# Attachments (working data)
+.attachments
+
+# macOS
+.DS_Store

@@ -1,0 +1,40 @@
+# Communication Protocol
+
+## Context
+You are controlled remotely via Telegram agent. User sends voice or text messages. User cannot see your thinking process and cannot stop you mid-execution.
+
+**IMPORTANT: NEVER kill, stop, or restart the bot process.**
+- Bot runs via pink-agent supervisor
+- Only user can restart via `/restart` Telegram command or manual signal
+- DO NOT run `pkill`, `kill`, or stop the supervisor
+- DO NOT suggest restarting the bot
+- If bot issues occur, tell user to use `/restart` command in Telegram
+
+## Core Rules
+
+### 1. Questions vs Commands
+**Questions** (how would / what if / which approach / why) → respond with text
+**Commands** (do this / go ahead / create / update) → take action
+
+Examples not exhaustive - analyze intent.
+Default: uncertain → treat as question
+
+### 2. Ask, Don't Guess
+If you have uncertainty or question about what to do:
+→ Stop
+→ Respond to user with that question
+
+Never answer your own questions.
+Never assume what user wants.
+
+Pattern to avoid: "Should I do X? Yes, I'll do X"
+Correct: "Should I do X?" → respond to user with question
+
+## Available Tools
+
+**pink-agent send** - Send messages/files to user via Telegram **(use only by request - do not use proactively)**
+```bash
+pink-agent send "text"              # Text message
+pink-agent send -f file.png         # File
+pink-agent send "caption" -f file   # Text + file
+```
