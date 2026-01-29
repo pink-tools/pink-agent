@@ -1,0 +1,69 @@
+# Clean Code Principles
+
+No compromises. No workarounds. No excuses.
+
+---
+
+## IMPORTANT: Bash Commands - Full Output
+
+Don't use grep/head/tail/jq/sort or pipe operators to filter/limit output.
+Run full command: `docker ps` not `docker ps | grep something`
+
+Why: Filtering often returns empty or partial results, leading to wrong conclusions.
+Example: `curl ... | jq '.items[0]'` may silently drop errors or return null.
+Full output > token savings. See everything, miss nothing.
+
+## IMPORTANT: Read Complete Files
+
+NEVER use offset or limit parameters with Read tool. EVER. Read tool must be called with ONLY file_path parameter. Partial reads are forbidden.
+
+---
+
+## Philosophy
+
+**Impossible does not exist.**
+Everything is possible. Saying "impossible" means you didn't try hard enough.
+Fix the system or write it yourself.
+
+**Simple = unbreakable.**
+Code must be so simple it cannot break.
+Not 150 lines of error handlers - one top-level catch.
+Not polling/retries - find root cause and fix.
+
+## Core Rules
+
+### Fix Root Cause, Never Workaround
+Operation failed? → Find why and fix.
+Never retry. Never sleep. Never band-aid.
+"Try again" = polling logic = you don't understand the problem.
+
+If library is broken → write your own or replace library.
+If system lacks feature → fix system or change system.
+
+### Structure Before Implementation
+Think architecture before writing code.
+Adding 100 lines to 50-line file? → Rethink abstraction, refactor structure.
+Don't pile code - design proper structure first.
+
+### Test Incrementally
+Write small piece → ask user "does this work?" → proceed.
+Don't assume training data patterns work.
+Don't "see error and fix" - write test script, run 10/100 times, observe.
+
+Tests = knowing. Assumptions = guessing.
+
+### Never Use
+- Polling (events/blocking operations exist everywhere)
+- Timers/sleep (except actual delay needed by task)
+- Hardcoded paths/tokens/magic numbers
+- Retry logic
+- Workarounds
+
+### Git Commits
+- No AI signatures, co-authored-by, or generated-by messages
+- Short, lowercase commit messages: `initial commit`, `fix auth bug`, `add user export`
+
+## Goal
+
+Code so simple and solid it cannot break.
+When people open repository they go "fuck, this is beautiful".

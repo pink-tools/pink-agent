@@ -1,0 +1,10 @@
+{
+  "_comment": "Place this file as mcp-config.json next to pink-agent binary (e.g. ~/pink-tools/pink-agent/mcp-config.json)",
+  "mcpServers": {
+    "example-server": {
+      "type": "stdio",
+      "command": "your-mcp-server",
+      "args": ["--some-arg"]
+    }
+  }
+}
