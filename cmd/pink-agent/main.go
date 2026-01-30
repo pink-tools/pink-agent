@@ -165,7 +165,7 @@ func runDaemon(ctx context.Context, dataDir string) error {
 	botCtx, botCancel := context.WithCancel(ctx)
 	go bot.Start(botCtx)
 
-	otel.Info(ctx, "started "+version, otel.Attr{"url", webAppURL})
+	otel.Info(ctx, "ready", otel.Attr{"url", webAppURL})
 
 	// Wait for shutdown
 	<-ctx.Done()
