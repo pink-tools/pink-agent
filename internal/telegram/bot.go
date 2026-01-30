@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	otel "github.com/pink-tools/pink-otel"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -31,18 +32,39 @@ func NewBot(token string, userID int64, handlers *Handlers) (*Bot, error) {
 }
 
 func (b *Bot) Start(ctx context.Context) {
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
-
-	updates := b.api.GetUpdatesChan(u)
+	config := tgbotapi.NewUpdate(0)
+	config.Timeout = 60
 
 	otel.Info(ctx, "telegram bot started", otel.Attr{"username", b.api.Self.UserName})
 
+	connected := true
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case update := <-updates:
+		default:
+		}
+
+		updates, err := b.api.GetUpdates(config)
+		if err != nil {
+			if connected {
+				otel.Warn(ctx, "telegram disconnected, reconnecting...")
+				connected = false
+			}
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		if !connected {
+			otel.Info(ctx, "telegram reconnected")
+			connected = true
+		}
+
+		for _, update := range updates {
+			if update.UpdateID >= config.Offset {
+				config.Offset = update.UpdateID + 1
+			}
+
 			if update.Message == nil {
 				continue
 			}
