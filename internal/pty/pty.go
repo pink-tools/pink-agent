@@ -144,10 +144,7 @@ func (m *Manager) start(sessionID string) {
 	// Create PTY
 	p, err := gopty.New()
 	if err != nil {
-		otel.Error(context.Background(), "failed to create pty", map[string]any{
-			"error":     err.Error(),
-			"sessionID": sessionID,
-		})
+		otel.Error(context.Background(), "failed to create pty", otel.Attr{"error", err.Error()}, otel.Attr{"sessionID", sessionID})
 		return
 	}
 
@@ -170,12 +167,7 @@ func (m *Manager) start(sessionID string) {
 	cmd.Dir = homeDir
 
 	if err := cmd.Start(); err != nil {
-		otel.Error(context.Background(), "failed to start pty command", map[string]any{
-			"error":     err.Error(),
-			"sessionID": sessionID,
-			"command":   command,
-			"args":      args,
-		})
+		otel.Error(context.Background(), "failed to start pty command", otel.Attr{"error", err.Error()}, otel.Attr{"sessionID", sessionID}, otel.Attr{"command", command}, otel.Attr{"args", args})
 		p.Close()
 		return
 	}

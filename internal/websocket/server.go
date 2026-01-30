@@ -122,9 +122,7 @@ func (s *Server) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		initData := r.URL.Query().Get("initData")
 		if err := auth.Validate(initData, s.botToken, s.userID); err != nil {
-			otel.Warn(r.Context(), "websocket auth failed", map[string]any{
-				"error": err.Error(),
-			})
+			otel.Warn(r.Context(), "websocket auth failed", otel.Attr{"error", err.Error()})
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -210,7 +208,7 @@ func (s *Server) handleCommand(ctx context.Context, cmd Command) {
 	case "create_project":
 		err = s.state.CreateProject(cmd.Name)
 		if err == nil {
-			otel.Info(ctx, "project created", map[string]any{"name": cmd.Name})
+			otel.Info(ctx, "project created", otel.Attr{"name", cmd.Name})
 			// Initialize PROJECT.md for new project
 			if project := s.state.State().GetActiveProject(); project != nil {
 				s.store.InitProjectContext(project.ID)
@@ -228,7 +226,7 @@ func (s *Server) handleCommand(ctx context.Context, cmd Command) {
 		s.store.DeleteProject(cmd.ID)
 		err = s.state.DeleteProject(cmd.ID)
 		if err == nil {
-			otel.Info(ctx, "project deleted", map[string]any{"name": projectName})
+			otel.Info(ctx, "project deleted", otel.Attr{"name", projectName})
 			s.sendState()
 		}
 
@@ -251,7 +249,7 @@ func (s *Server) handleCommand(ctx context.Context, cmd Command) {
 			if p := s.state.State().GetActiveProject(); p != nil {
 				toProject = p.Name
 			}
-			otel.Info(ctx, "switched project", map[string]any{"from": fromProject, "to": toProject})
+			otel.Info(ctx, "switched project", otel.Attr{"from", fromProject}, otel.Attr{"to", toProject})
 			s.activateSession()
 		}
 
@@ -279,7 +277,7 @@ func (s *Server) handleCommand(ctx context.Context, cmd Command) {
 			projectName, projectCtx := s.getProjectInfo()
 			realClaudeID, createErr := claude.CreateSession(projectName, projectCtx)
 			if createErr != nil {
-				otel.Error(ctx, "create session failed", map[string]any{"error": createErr.Error()})
+				otel.Error(ctx, "create session failed", otel.Attr{"error", createErr.Error()})
 				s.state.CancelPendingSession(pending)
 				s.sendError(createErr.Error())
 				s.sendState()
@@ -287,13 +285,13 @@ func (s *Server) handleCommand(ctx context.Context, cmd Command) {
 			}
 
 			if err := s.state.FinishSession(pending, realClaudeID); err != nil {
-				otel.Error(ctx, "finish session failed", map[string]any{"error": err.Error()})
+				otel.Error(ctx, "finish session failed", otel.Attr{"error", err.Error()})
 				s.sendError(err.Error())
 				s.sendState()
 				return
 			}
 
-			otel.Info(ctx, "session created", map[string]any{"name": name, "id": realClaudeID})
+			otel.Info(ctx, "session created", otel.Attr{"name", name}, otel.Attr{"id", realClaudeID})
 			s.activateSession()
 		}(sessionName, pendingID)
 		return
@@ -309,7 +307,7 @@ func (s *Server) handleCommand(ctx context.Context, cmd Command) {
 		s.pty.Stop()
 		err = s.state.DeleteSession(cmd.ClaudeID)
 		if err == nil {
-			otel.Info(ctx, "session deleted", map[string]any{"name": sessionName})
+			otel.Info(ctx, "session deleted", otel.Attr{"name", sessionName})
 			if s.state.State().GetActiveSession() != nil {
 				s.activateSession()
 			} else {
@@ -336,7 +334,7 @@ func (s *Server) handleCommand(ctx context.Context, cmd Command) {
 			if sess := s.state.State().GetActiveSession(); sess != nil {
 				toSession = sess.Name
 			}
-			otel.Info(ctx, "switched session", map[string]any{"from": fromSession, "to": toSession})
+			otel.Info(ctx, "switched session", otel.Attr{"from", fromSession}, otel.Attr{"to", toSession})
 			s.activateSession()
 		}
 
@@ -356,7 +354,7 @@ func (s *Server) handleCommand(ctx context.Context, cmd Command) {
 		// Set session status to compacting
 		err = s.state.SetSessionStatus(session.ClaudeID, domain.SessionStatusCompacting)
 		if err != nil {
-			otel.Error(ctx, "compact set status failed", map[string]any{"error": err.Error()})
+			otel.Error(ctx, "compact set status failed", otel.Attr{"error", err.Error()})
 			break
 		}
 		s.pty.Stop()
@@ -369,7 +367,7 @@ func (s *Server) handleCommand(ctx context.Context, cmd Command) {
 			// Summarize old session
 			summary, sumErr := claude.Summarize(oldClaudeID)
 			if sumErr != nil {
-				otel.Error(ctx, "compact summarize failed", map[string]any{"error": sumErr.Error()})
+				otel.Error(ctx, "compact summarize failed", otel.Attr{"error", sumErr.Error()})
 				s.state.SetSessionStatus(oldClaudeID, domain.SessionStatusReady) // restore
 				s.sendError("compact failed: " + sumErr.Error())
 				s.sendState()
@@ -380,7 +378,7 @@ func (s *Server) handleCommand(ctx context.Context, cmd Command) {
 			_, projectCtx := s.getProjectInfo()
 			newClaudeID, createErr := claude.CreateWithTakeover(summary, projectCtx)
 			if createErr != nil {
-				otel.Error(ctx, "compact create failed", map[string]any{"error": createErr.Error()})
+				otel.Error(ctx, "compact create failed", otel.Attr{"error", createErr.Error()})
 				s.state.SetSessionStatus(oldClaudeID, domain.SessionStatusReady) // restore
 				s.sendError("compact failed: " + createErr.Error())
 				s.sendState()
@@ -400,7 +398,7 @@ func (s *Server) handleCommand(ctx context.Context, cmd Command) {
 
 	// Terminal
 	case "input":
-		otel.Info(ctx, "input", map[string]any{"text": cmd.Text})
+		otel.Info(ctx, "input", otel.Attr{"text", cmd.Text})
 		err = s.pty.Write(cmd.Text)
 
 	case "resize":

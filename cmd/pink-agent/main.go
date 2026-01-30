@@ -124,7 +124,7 @@ func runDaemon(ctx context.Context, dataDir string) error {
 
 	// Wait for tunnel to be ready
 	tun.WaitReady()
-	otel.Info(ctx, "tunnel ready", map[string]any{"url": tun.URL()})
+	otel.Info(ctx, "tunnel ready", otel.Attr{"url", tun.URL()})
 
 	// Initialize WebSocket server
 	wsServer := websocket.NewServer(stateManager, ptyManager, fileStore, cfg.TelegramBotToken, cfg.TelegramUserID)
@@ -140,7 +140,7 @@ func runDaemon(ctx context.Context, dataDir string) error {
 	server := &http.Server{Addr: fmt.Sprintf(":%d", cfg.Port)}
 	go func() {
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
-			otel.Error(ctx, "http server error", map[string]any{"error": err.Error()})
+			otel.Error(ctx, "http server error", otel.Attr{"error", err.Error()})
 		}
 	}()
 
@@ -155,7 +155,7 @@ func runDaemon(ctx context.Context, dataDir string) error {
 	// Set menu button
 	webAppURL := fmt.Sprintf("%s?api=%s", webAppBaseURL, url.QueryEscape(tun.URL()))
 	if err := bot.SetMenuButton(webAppURL); err != nil {
-		otel.Warn(ctx, "failed to set menu button", map[string]any{"error": err.Error()})
+		otel.Warn(ctx, "failed to set menu button", otel.Attr{"error", err.Error()})
 	}
 
 	// Send startup message
@@ -165,10 +165,7 @@ func runDaemon(ctx context.Context, dataDir string) error {
 	botCtx, botCancel := context.WithCancel(ctx)
 	go bot.Start(botCtx)
 
-	otel.Info(ctx, "started", map[string]any{
-		"version": version,
-		"url":     webAppURL,
-	})
+	otel.Info(ctx, "started "+version, otel.Attr{"url", webAppURL})
 
 	// Wait for shutdown
 	<-ctx.Done()

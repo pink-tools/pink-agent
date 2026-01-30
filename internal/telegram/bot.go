@@ -36,9 +36,7 @@ func (b *Bot) Start(ctx context.Context) {
 
 	updates := b.api.GetUpdatesChan(u)
 
-	otel.Info(ctx, "telegram bot started", map[string]any{
-		"username": b.api.Self.UserName,
-	})
+	otel.Info(ctx, "telegram bot started", otel.Attr{"username", b.api.Self.UserName})
 
 	for {
 		select {

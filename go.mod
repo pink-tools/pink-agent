@@ -2,6 +2,10 @@ module pink-agent
 
 go 1.25.4
 
+replace github.com/pink-tools/pink-otel => ../pink-otel
+
+replace github.com/pink-tools/pink-core => ../pink-core
+
 require (
 	github.com/aymanbagabas/go-pty v0.2.2
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
