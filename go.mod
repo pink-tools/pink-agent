@@ -2,16 +2,12 @@ module pink-agent
 
 go 1.25.4
 
-replace github.com/pink-tools/pink-otel => ../pink-otel
-
-replace github.com/pink-tools/pink-core => ../pink-core
-
 require (
 	github.com/aymanbagabas/go-pty v0.2.2
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/pink-tools/pink-otel v1.5.1
+	github.com/pink-tools/pink-otel v1.6.0
 )
 
 require github.com/joho/godotenv v1.5.1 // indirect
@@ -19,7 +15,7 @@ require github.com/joho/godotenv v1.5.1 // indirect
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/creack/pty v1.1.24 // indirect
-	github.com/pink-tools/pink-core v1.5.0
+	github.com/pink-tools/pink-core v1.6.0
 	github.com/u-root/u-root v0.11.0 // indirect
 	go.opentelemetry.io/otel v1.39.0 // indirect
 	go.opentelemetry.io/otel/trace v1.39.0 // indirect
