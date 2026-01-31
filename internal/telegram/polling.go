@@ -13,9 +13,10 @@ import (
 )
 
 type Bot struct {
-	api      *tgbotapi.BotAPI
-	userID   int64
-	handlers *Handlers
+	api          *tgbotapi.BotAPI
+	userID       int64
+	handlers     *Handlers
+	pendingFiles []string // files waiting for text
 }
 
 func NewBot(token string, userID int64, handlers *Handlers) (*Bot, error) {
@@ -79,43 +80,85 @@ func (b *Bot) Start(ctx context.Context) {
 
 func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	msg := update.Message
-	var reply string
 
-	switch {
-	case msg.Voice != nil:
-		b.setReaction(msg.Chat.ID, msg.MessageID, "⚡")
-
-		path, err := b.downloadFile(msg.Voice.FileID, "voice.ogg")
-		if err != nil {
-			b.setReaction(msg.Chat.ID, msg.MessageID, "")
-			reply = "Failed to download voice: " + err.Error()
-		} else {
-			transcribed, errMsg := b.handlers.HandleVoice(path)
-			b.setReaction(msg.Chat.ID, msg.MessageID, "")
-			if errMsg != "" {
-				reply = errMsg
-			} else if transcribed != "" {
-				reply = transcribed
-			}
-		}
-
-	case msg.Document != nil:
-		path, err := b.downloadFile(msg.Document.FileID, msg.Document.FileName)
-		if err != nil {
-			reply = "Failed to download file: " + err.Error()
-		} else {
-			reply = b.handlers.HandleFile(path)
-		}
-
-	case msg.Text != "":
-		reply = b.handlers.HandleText(msg.Text)
-
-	default:
+	// Voice is special — transcribe and send
+	if msg.Voice != nil {
+		b.handleVoice(ctx, msg)
 		return
 	}
 
+	// Download any files in this message
+	if msg.Photo != nil && len(msg.Photo) > 0 {
+		photo := msg.Photo[len(msg.Photo)-1]
+		if path, err := b.downloadFile(photo.FileID, "photo.jpg"); err == nil {
+			b.pendingFiles = append(b.pendingFiles, path)
+		}
+	}
+
+	if msg.Document != nil {
+		if path, err := b.downloadFile(msg.Document.FileID, msg.Document.FileName); err == nil {
+			b.pendingFiles = append(b.pendingFiles, path)
+		}
+	}
+
+	if msg.Video != nil {
+		filename := "video.mp4"
+		if msg.Video.FileName != "" {
+			filename = msg.Video.FileName
+		}
+		if path, err := b.downloadFile(msg.Video.FileID, filename); err == nil {
+			b.pendingFiles = append(b.pendingFiles, path)
+		}
+	}
+
+	if msg.Audio != nil {
+		filename := "audio.mp3"
+		if msg.Audio.FileName != "" {
+			filename = msg.Audio.FileName
+		}
+		if path, err := b.downloadFile(msg.Audio.FileID, filename); err == nil {
+			b.pendingFiles = append(b.pendingFiles, path)
+		}
+	}
+
+	// Get text from Caption or Text
+	text := msg.Caption
+	if text == "" {
+		text = msg.Text
+	}
+
+	// No text yet — files accumulate, wait for text
+	if text == "" {
+		return
+	}
+
+	// Text received — send with all accumulated files
+	files := b.pendingFiles
+	b.pendingFiles = nil
+
+	reply := b.handlers.HandleMessage(text, files)
 	if reply != "" {
 		b.SendMessage(msg.Chat.ID, reply)
+	}
+}
+
+func (b *Bot) handleVoice(ctx context.Context, msg *tgbotapi.Message) {
+	b.setReaction(msg.Chat.ID, msg.MessageID, "⚡")
+
+	path, err := b.downloadFile(msg.Voice.FileID, "voice.ogg")
+	if err != nil {
+		b.setReaction(msg.Chat.ID, msg.MessageID, "")
+		b.SendMessage(msg.Chat.ID, "Failed to download voice: "+err.Error())
+		return
+	}
+
+	transcribed, errMsg := b.handlers.HandleVoice(path)
+	b.setReaction(msg.Chat.ID, msg.MessageID, "")
+
+	if errMsg != "" {
+		b.SendMessage(msg.Chat.ID, errMsg)
+	} else if transcribed != "" {
+		b.SendMessage(msg.Chat.ID, "🎤 "+transcribed)
 	}
 }
 
@@ -179,3 +222,4 @@ func (b *Bot) setReaction(chatID int64, messageID int, emoji string) {
 
 	b.api.MakeRequest("setMessageReaction", params)
 }
+

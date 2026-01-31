@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -99,4 +100,12 @@ func CheckDeps() error {
 		return errors.New("cloudflared not found in PATH")
 	}
 	return nil
+}
+
+// AgentWorkDir returns parent of home directory.
+// Agent runs from here so both <parent>/.claude (agent) and ~/.claude (user) load.
+// macOS: /Users, Windows: C:\Users, Linux: /home
+func AgentWorkDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Dir(home)
 }

@@ -1,26 +1,27 @@
-package pty
+package claude
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	gopty "github.com/aymanbagabas/go-pty"
+	core "github.com/pink-tools/pink-core"
 	otel "github.com/pink-tools/pink-otel"
-	"pink-agent/internal/domain"
 	"pink-agent/internal/platform"
+	"pink-agent/internal/projects"
 )
 
-var readyMarker = []byte("\x1b[?1004h")
+var tokensRe = regexp.MustCompile(`(\d+) tokens`)
 
 const inputDelay = 250 * time.Millisecond
 
 type StateProvider interface {
-	GetActiveSession() *domain.Session
+	GetActiveSession() *projects.Session
 	GetTerminalSize() (uint16, uint16)
 }
 
@@ -50,11 +51,14 @@ func NewManager(state StateProvider, mcpConfig string) *Manager {
 func (m *Manager) Write(text string) error {
 	session := m.state.GetActiveSession()
 	if session == nil {
-		return domain.ErrNoActiveSession
+		return projects.ErrNoActiveSession
 	}
 
+	// If PTY not running or wrong session, start with this message already in queue
+	// This prevents race condition where flushQueue runs before we add to queue
 	if !m.isRunning() || m.sessionID != session.ClaudeID {
-		m.start(session.ClaudeID)
+		m.startWithMessage(session.ClaudeID, text)
+		return nil
 	}
 
 	if !m.ready {
@@ -74,9 +78,14 @@ func (m *Manager) writeToPTY(text string) error {
 }
 
 func (m *Manager) writeAndSubmit(text string) {
+	if m.pty == nil {
+		otel.Error(context.Background(), "writeAndSubmit: pty is nil")
+		return
+	}
 	m.pty.Write([]byte(text))
 	time.Sleep(inputDelay)
 	m.pty.Write([]byte("\r"))
+	otel.Info(context.Background(), "message sent to pty")
 }
 
 func (m *Manager) Resize(cols, rows uint16) {
@@ -95,6 +104,17 @@ func (m *Manager) Buffer() []byte {
 	return m.buffer.Bytes()
 }
 
+// Tokens returns current token count from PTY buffer
+func (m *Manager) Tokens() string {
+	buf := m.buffer.Bytes()
+	matches := tokensRe.FindAllSubmatch(buf, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	// Return last match (most recent)
+	return string(matches[len(matches)-1][1])
+}
+
 func (m *Manager) SetOutputHandler(fn func([]byte)) {
 	m.onOutput = fn
 }
@@ -103,7 +123,16 @@ func (m *Manager) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.cmd != nil && m.cmd.Process != nil {
+	if m.cmd == nil {
+		return
+	}
+
+	// Log session stopping
+	if session := m.state.GetActiveSession(); session != nil {
+		otel.Info(context.Background(), "session stopping", otel.Attr{"name", session.Name})
+	}
+
+	if m.cmd.Process != nil {
 		m.cmd.Process.Kill()
 		go m.cmd.Wait()
 	}
@@ -133,13 +162,30 @@ func (m *Manager) isRunning() bool {
 }
 
 func (m *Manager) start(sessionID string) {
+	m.startWithMessage(sessionID, "")
+}
+
+func (m *Manager) startWithMessage(sessionID string, initialMessage string) {
 	m.Stop()
 
 	m.sessionID = sessionID
 	m.ready = false
-	m.queue = nil
+	if initialMessage != "" {
+		m.queue = []string{initialMessage}
+	} else {
+		m.queue = nil
+	}
 	m.buffer.Clear()
 	m.utf8Remainder = nil
+
+	// Log session starting
+	sessionName := sessionID[:8] // fallback to truncated ID
+	if session := m.state.GetActiveSession(); session != nil {
+		sessionName = session.Name
+	}
+	otel.Info(context.Background(), "session starting", otel.Attr{"name", sessionName})
+
+	cols, rows := m.state.GetTerminalSize()
 
 	// Create PTY
 	p, err := gopty.New()
@@ -148,7 +194,6 @@ func (m *Manager) start(sessionID string) {
 		return
 	}
 
-	cols, rows := m.state.GetTerminalSize()
 	p.Resize(int(cols), int(rows))
 
 	// Build command
@@ -163,8 +208,7 @@ func (m *Manager) start(sessionID string) {
 	cmd := p.Command(command, args...)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
-	homeDir, _ := os.UserHomeDir()
-	cmd.Dir = homeDir
+	cmd.Dir = core.BaseDir()
 
 	if err := cmd.Start(); err != nil {
 		otel.Error(context.Background(), "failed to start pty command", otel.Attr{"error", err.Error()}, otel.Attr{"sessionID", sessionID}, otel.Attr{"command", command}, otel.Attr{"args", args})
@@ -179,18 +223,33 @@ func (m *Manager) start(sessionID string) {
 }
 
 func (m *Manager) readLoop(pty gopty.Pty) {
+	otel.Info(context.Background(), "readLoop started")
 	buf := make([]byte, 4096)
 	for {
 		n, err := pty.Read(buf)
 		if err != nil {
+			otel.Info(context.Background(), "readLoop ended", otel.Attr{"error", err.Error()})
+			// Check if process exited with error
+			// Save to local var to avoid race with Stop()
+			cmd := m.cmd
+			if cmd != nil {
+				cmd.Wait()
+				if cmd.ProcessState != nil && !cmd.ProcessState.Success() {
+					otel.Error(context.Background(), "claude exited with error",
+						otel.Attr{"exitCode", cmd.ProcessState.ExitCode()},
+						otel.Attr{"sessionID", m.sessionID[:8]},
+					)
+				}
+			}
 			return
 		}
 
 		data := make([]byte, n)
 		copy(data, buf[:n])
 
-		if !m.ready && bytes.Contains(data, readyMarker) {
-			m.flushQueue()
+		if !m.ready && tokensRe.Match(data) {
+			m.ready = true // Set immediately to prevent multiple triggers
+			go m.flushQueue()
 		}
 
 		// Handle UTF-8 boundaries
@@ -219,14 +278,24 @@ func (m *Manager) readLoop(pty gopty.Pty) {
 }
 
 func (m *Manager) flushQueue() {
-	m.ready = true
+	// Log session ready
+	sessionName := m.sessionID[:8]
+	if session := m.state.GetActiveSession(); session != nil {
+		sessionName = session.Name
+	}
+	otel.Info(context.Background(), "session ready", otel.Attr{"name", sessionName}, otel.Attr{"queueLen", len(m.queue)})
+
 	if len(m.queue) == 0 {
 		return
 	}
 
+	// Small delay after tokens marker
+	time.Sleep(500 * time.Millisecond)
+
 	combined := m.combineQueue()
 	m.queue = nil
 
+	otel.Info(context.Background(), "flushing queue", otel.Attr{"len", len(combined)})
 	m.writeAndSubmit(combined)
 }
 

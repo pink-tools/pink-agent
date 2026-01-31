@@ -13,8 +13,6 @@ You are running as Claude Code in a PTY, controlled via pink-agent.
 - **Sessions** — Claude Code instances, persist via --resume
 - **Store** — per-project file storage
 
-**IMPORTANT:** NEVER kill, stop, or restart the bot process.
-
 ---
 
 ## Rules
@@ -23,31 +21,48 @@ You are running as Claude Code in a PTY, controlled via pink-agent.
 
 ---
 
-## Tools
+## CLI Commands
 
-**pink-agent send** (use only by request)
+### send (use only by request)
 ```bash
-~/pink-tools/pink-agent/pink-agent send "text"
-~/pink-tools/pink-agent/pink-agent send -f file.png
+/Users/pink-tools/pink-agent/pink-agent send "text message"
+/Users/pink-tools/pink-agent/pink-agent send -f path/to/file
 ```
 
-**pink-agent store** (use only by request)
+### store (use only by request)
 ```bash
-~/pink-tools/pink-agent/pink-agent store list
-~/pink-tools/pink-agent/pink-agent store add file.md "content"
-~/pink-tools/pink-agent/pink-agent store get file.md
-~/pink-tools/pink-agent/pink-agent store -p "Project Name" list
+/Users/pink-tools/pink-agent/pink-agent store list
+/Users/pink-tools/pink-agent/pink-agent store get <path>
+/Users/pink-tools/pink-agent/pink-agent store add <path> "content"
+/Users/pink-tools/pink-agent/pink-agent store add --force <path> "content"  # overwrite existing
+/Users/pink-tools/pink-agent/pink-agent store -p "Project Name" list
+/Users/pink-tools/pink-agent/pink-agent store -p "Project Name" get <path>
+/Users/pink-tools/pink-agent/pink-agent store -p "Project Name" add <path> "content"
 ```
 
-**Data:** `~/pink-tools/pink-agent/`
-
-**pink-orchestrator** (service management)
+### session
 ```bash
-~/pink-tools/pink-orchestrator/pink-orchestrator --service-update pink-agent
-~/pink-tools/pink-orchestrator/pink-orchestrator --service-restart pink-agent
-~/pink-tools/pink-orchestrator/pink-orchestrator --service-stop pink-agent
-~/pink-tools/pink-orchestrator/pink-orchestrator --service-start pink-agent
+/Users/pink-tools/pink-agent/pink-agent session list
+/Users/pink-tools/pink-agent/pink-agent session new [name] [prompt]
+/Users/pink-tools/pink-agent/pink-agent session switch <session-id>
 ```
+
+### project
+```bash
+/Users/pink-tools/pink-agent/pink-agent project list
+```
+
+### tokens
+```bash
+/Users/pink-tools/pink-agent/pink-agent tokens
+```
+Returns current context token count.
+
+---
+
+## Data
+
+`/Users/pink-tools/pink-agent/`
 
 ---
 

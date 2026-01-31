@@ -2,25 +2,29 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/pink-tools/pink-core"
 	otel "github.com/pink-tools/pink-otel"
+	"pink-agent/internal/cli"
+	"pink-agent/internal/claude"
 	"pink-agent/internal/config"
-	"pink-agent/internal/pty"
-	"pink-agent/internal/state"
-	"pink-agent/internal/store"
+	"pink-agent/internal/projects"
 	"pink-agent/internal/telegram"
-	"pink-agent/internal/transcriber"
-	"pink-agent/internal/tunnel"
 	"pink-agent/internal/websocket"
 )
 
 var version = "dev"
+var ptyManager *claude.Manager
+var stateManager *projects.Manager
+var wsServer *websocket.Server
 
 const (
 	serviceName   = "pink-agent"
@@ -45,6 +49,11 @@ Usage:
   pink-agent store list               List files in active project
   pink-agent store get <path>         Get file content
   pink-agent store add <path> <text>  Add file to store
+  pink-agent tokens                   Show current token count
+  pink-agent session list             List sessions in active project
+  pink-agent session new [name] [prompt]  Create new session
+  pink-agent session switch <id>      Switch to session
+  pink-agent project list             List all projects
   pink-agent --version                Show version
   pink-agent --help                   Show this help
 
@@ -75,12 +84,110 @@ Store flags:
 			},
 			"send": {
 				Desc: "Send message or file",
-				Run:  handleSend,
+				Run:  cli.HandleSend,
 			},
 			"store": {
 				Desc: "File store operations",
-				Run:  handleStore,
+				Run:  cli.HandleStore,
 			},
+			"tokens": {
+				Desc: "Show current token count",
+				Run:  cli.HandleTokens,
+			},
+			"session": {
+				Desc: "Session management (list, switch)",
+				Run:  cli.HandleSession,
+			},
+			"project": {
+				Desc: "Project management (list)",
+				Run:  cli.HandleProject,
+			},
+		},
+		IPCHandler: func(cmd string) string {
+			switch {
+			case cmd == "getContextTokens":
+				if ptyManager == nil {
+					return "0"
+				}
+				tokens := ptyManager.Tokens()
+				if tokens == "" {
+					return "0"
+				}
+				return tokens
+
+			case cmd == "getState":
+				if stateManager == nil {
+					return "ERROR:not initialized"
+				}
+				data, err := json.Marshal(stateManager.State())
+				if err != nil {
+					return "ERROR:" + err.Error()
+				}
+				return string(data)
+
+			case strings.HasPrefix(cmd, "switchSession:"):
+				if stateManager == nil {
+					return "ERROR:not initialized"
+				}
+				sessionID := strings.TrimPrefix(cmd, "switchSession:")
+				if ptyManager != nil {
+					ptyManager.Stop()
+				}
+				if err := stateManager.SwitchSession(sessionID); err != nil {
+					return "ERROR:" + err.Error()
+				}
+				if ptyManager != nil {
+					ptyManager.Start()
+				}
+				return "OK"
+
+			case cmd == "refreshStore":
+			if wsServer != nil {
+				wsServer.RefreshStore()
+			}
+			return "OK"
+
+		case strings.HasPrefix(cmd, "createSession:"):
+				if stateManager == nil {
+					return "ERROR:not initialized"
+				}
+				jsonData := strings.TrimPrefix(cmd, "createSession:")
+				var params struct {
+					Name   string `json:"name"`
+					Prompt string `json:"prompt"`
+				}
+				if err := json.Unmarshal([]byte(jsonData), &params); err != nil {
+					return "ERROR:invalid params: " + err.Error()
+				}
+				project := stateManager.State().GetActiveProject()
+				if project == nil {
+					return "ERROR:no active project"
+				}
+				name := params.Name
+				if name == "" {
+					name = fmt.Sprintf("Session %d", len(project.Sessions)+1)
+				}
+				pendingID := fmt.Sprintf("pending-%d", time.Now().UnixNano())
+				if err := stateManager.CreatePendingSession(name, pendingID); err != nil {
+					return "ERROR:" + err.Error()
+				}
+				// Create session async
+				go func(projectName, prompt string) {
+					realID, err := claude.CreateSession(projectName, prompt)
+					if err != nil {
+						stateManager.CancelPendingSession(pendingID)
+						return
+					}
+					stateManager.FinishSession(pendingID, realID)
+					if ptyManager != nil {
+						ptyManager.Start()
+					}
+				}(project.Name, params.Prompt)
+				return "OK"
+
+			default:
+				return "UNKNOWN"
+			}
 		},
 	}, func(ctx context.Context) error {
 		return runDaemon(ctx, dataDir)
@@ -101,22 +208,22 @@ func runDaemon(ctx context.Context, dataDir string) error {
 
 	// Initialize state
 	statePath := filepath.Join(dataDir, "state.json")
-	storage := state.NewFileStorage(statePath)
-	stateManager, err := state.NewManager(storage)
+	storage := projects.NewFileStorage(statePath)
+	stateManager, err = projects.NewManager(storage)
 	if err != nil {
 		return fmt.Errorf("load state: %w", err)
 	}
 
 	// Initialize store
 	storePath := filepath.Join(dataDir, "store")
-	fileStore := store.New(storePath)
+	fileStore := projects.NewFileStore(storePath)
 
 	// Initialize PTY manager
 	mcpConfig := filepath.Join(dataDir, "mcp-config.json")
-	ptyManager := pty.NewManager(stateManager, mcpConfig)
+	ptyManager = claude.NewManager(stateManager, mcpConfig)
 
 	// Initialize tunnel
-	tun := tunnel.New(cfg.TunnelName, cfg.TunnelID, cfg.Port)
+	tun := websocket.New(cfg.TunnelName, cfg.TunnelID, cfg.Port)
 	if err := tun.Start(); err != nil {
 		return fmt.Errorf("start tunnel: %w", err)
 	}
@@ -127,7 +234,12 @@ func runDaemon(ctx context.Context, dataDir string) error {
 	otel.Info(ctx, "tunnel ready", otel.Attr{"url", tun.URL()})
 
 	// Initialize WebSocket server
-	wsServer := websocket.NewServer(stateManager, ptyManager, fileStore, cfg.TelegramBotToken, cfg.TelegramUserID)
+	wsServer = websocket.NewServer(stateManager, ptyManager, fileStore, cfg.TelegramBotToken, cfg.TelegramUserID)
+
+	// Register state change callback for automatic broadcast
+	stateManager.SetOnChange(func(state *projects.State) {
+		wsServer.BroadcastState(state)
+	})
 
 	// Start HTTP server
 	http.HandleFunc("/ws", wsServer.Handler())
@@ -145,8 +257,7 @@ func runDaemon(ctx context.Context, dataDir string) error {
 	}()
 
 	// Initialize Telegram bot
-	trans := &transcriberWrapper{}
-	handlers := telegram.NewHandlers(ptyManager, trans)
+	handlers := telegram.NewHandlers(ptyManager)
 	bot, err := telegram.NewBot(cfg.TelegramBotToken, cfg.TelegramUserID, handlers)
 	if err != nil {
 		return fmt.Errorf("create telegram bot: %w", err)
@@ -178,113 +289,3 @@ func runDaemon(ctx context.Context, dataDir string) error {
 	return nil
 }
 
-type transcriberWrapper struct{}
-
-func (t *transcriberWrapper) Transcribe(path string) (string, error) {
-	return transcriber.Transcribe(path)
-}
-
-func handleSend(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: pink-agent send <text> | pink-agent send -f <file>")
-	}
-
-	dataDir := core.DataDir(serviceName)
-	envPath := filepath.Join(dataDir, ".env")
-
-	cfg, err := config.Load(envPath)
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-
-	chatID := cfg.TelegramUserID
-
-	if args[0] == "-f" {
-		if len(args) < 2 {
-			return fmt.Errorf("usage: pink-agent send -f <file>")
-		}
-		return telegram.SendFile(cfg.TelegramBotToken, chatID, args[1])
-	}
-
-	return telegram.SendMessage(cfg.TelegramBotToken, chatID, args[0])
-}
-
-func handleStore(args []string) error {
-	dataDir := core.DataDir(serviceName)
-	storePath := filepath.Join(dataDir, "store")
-	statePath := filepath.Join(dataDir, "state.json")
-
-	storage := state.NewFileStorage(statePath)
-	stateManager, err := state.NewManager(storage)
-	if err != nil {
-		return fmt.Errorf("load state: %w", err)
-	}
-
-	fileStore := store.New(storePath)
-
-	// Parse -p flag for project
-	projectID := ""
-	i := 0
-	for i < len(args) {
-		if args[i] == "-p" && i+1 < len(args) {
-			projectName := args[i+1]
-			for _, p := range stateManager.State().Projects {
-				if p.Name == projectName {
-					projectID = p.ID
-					break
-				}
-			}
-			if projectID == "" {
-				return fmt.Errorf("project not found: %s", projectName)
-			}
-			args = append(args[:i], args[i+2:]...)
-		} else {
-			i++
-		}
-	}
-
-	// Use active project if not specified
-	if projectID == "" {
-		project := stateManager.State().GetActiveProject()
-		if project == nil {
-			return fmt.Errorf("no active project")
-		}
-		projectID = project.ID
-	}
-
-	if len(args) == 0 {
-		return fmt.Errorf("usage: pink-agent store [list|get|add] ...")
-	}
-
-	switch args[0] {
-	case "list":
-		files, err := fileStore.List(projectID)
-		if err != nil {
-			return err
-		}
-		for _, f := range files {
-			fmt.Println(f.Name)
-		}
-
-	case "get":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: pink-agent store get <path>")
-		}
-		content, err := fileStore.Get(projectID, args[1])
-		if err != nil {
-			return err
-		}
-		fmt.Print(string(content))
-
-	case "add":
-		if len(args) < 3 {
-			return fmt.Errorf("usage: pink-agent store add <path> <content>")
-		}
-		return fileStore.Add(projectID, args[1], []byte(args[2]))
-
-	default:
-		return fmt.Errorf("unknown store command: %s", args[0])
-	}
-
-	return nil
-}

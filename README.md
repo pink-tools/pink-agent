@@ -19,7 +19,7 @@ sudo mv pink-agent /usr/local/bin/
 
 ## Configuration
 
-Create `~/pink-tools/pink-agent/.env`:
+Create `/Users/pink-tools/pink-agent/.env`:
 
 ```bash
 TELEGRAM_BOT_TOKEN=your_bot_token

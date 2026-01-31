@@ -4,21 +4,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
+
+	core "github.com/pink-tools/pink-core"
 )
 
 const initSessionPrompt = `You are a new Pink Agent session.
 Project: %s
 
-Read configuration: ~/.claude/CLAUDE.md
+Read configuration: /Users/.claude/CLAUDE.md
 
 PROJECT CONTEXT (project-specific memory):
 %s
 
 MEMORIZE: When user asks to remember/memorize something for this project, update PROJECT.md via:
-pink-agent store add PROJECT.md "full updated content here"`
+/Users/pink-tools/pink-agent/pink-agent store add PROJECT.md "full updated content here"`
 
 const summarizePrompt = `Create a structured session summary for initializing a new Claude Code session.
 
@@ -27,11 +28,11 @@ The summary will be given to a new instance of Claude Code to continue work wher
 FORMAT (use this structure, omitting sections that don't apply):
 
 WORKING DIRECTORIES (if applicable):
-- List 1-5 main directories where work was done (absolute paths starting with ~)
+- List 1-5 main directories where work was done (absolute paths starting with /Users)
 
 FILES TO READ FOR CONTEXT (if applicable):
 - List 5-15 most important files that new agent should read immediately
-- Use absolute paths (~/...)
+- Use absolute paths (/Users/...)
 - Prioritize: documentation, core implementation, recently modified files
 
 SESSION OVERVIEW:
@@ -58,7 +59,7 @@ INSTRUCTIONS:
 4. DO NOT make any changes to files — this is read-only context loading.
 
 MEMORIZE: When user asks to remember/memorize something for this project, update PROJECT.md via:
-pink-agent store add PROJECT.md "full updated content here"
+/Users/pink-tools/pink-agent/pink-agent store add PROJECT.md "full updated content here"
 
 Start reading the files now.`
 
@@ -102,7 +103,7 @@ func CreateWithTakeover(summary, projectContext string) (string, error) {
 
 func runClaude(args ...string) (string, error) {
 	cmd := exec.Command("claude", args...)
-	cmd.Dir, _ = os.UserHomeDir() // sessions are stored relative to cwd
+	cmd.Dir = core.BaseDir()
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
