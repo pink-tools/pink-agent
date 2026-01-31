@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -16,7 +17,8 @@ import (
 	"pink-agent/internal/projects"
 )
 
-var tokensRe = regexp.MustCompile(`(\d+) tokens`)
+var readyMarker = []byte("tokens")
+var numberRe = regexp.MustCompile(`\d+`)
 
 const inputDelay = 250 * time.Millisecond
 
@@ -85,7 +87,6 @@ func (m *Manager) writeAndSubmit(text string) {
 	m.pty.Write([]byte(text))
 	time.Sleep(inputDelay)
 	m.pty.Write([]byte("\r"))
-	otel.Info(context.Background(), "message sent to pty")
 }
 
 func (m *Manager) Resize(cols, rows uint16) {
@@ -107,12 +108,17 @@ func (m *Manager) Buffer() []byte {
 // Tokens returns current token count from PTY buffer
 func (m *Manager) Tokens() string {
 	buf := m.buffer.Bytes()
-	matches := tokensRe.FindAllSubmatch(buf, -1)
+	idx := bytes.LastIndex(buf, readyMarker)
+	if idx == -1 {
+		return ""
+	}
+	// Find last number before "tokens"
+	before := buf[:idx]
+	matches := numberRe.FindAll(before, -1)
 	if len(matches) == 0 {
 		return ""
 	}
-	// Return last match (most recent)
-	return string(matches[len(matches)-1][1])
+	return string(matches[len(matches)-1])
 }
 
 func (m *Manager) SetOutputHandler(fn func([]byte)) {
@@ -223,7 +229,6 @@ func (m *Manager) startWithMessage(sessionID string, initialMessage string) {
 }
 
 func (m *Manager) readLoop(pty gopty.Pty) {
-	otel.Info(context.Background(), "readLoop started")
 	buf := make([]byte, 4096)
 	for {
 		n, err := pty.Read(buf)
@@ -247,11 +252,6 @@ func (m *Manager) readLoop(pty gopty.Pty) {
 		data := make([]byte, n)
 		copy(data, buf[:n])
 
-		if !m.ready && tokensRe.Match(data) {
-			m.ready = true // Set immediately to prevent multiple triggers
-			go m.flushQueue()
-		}
-
 		// Handle UTF-8 boundaries
 		if len(m.utf8Remainder) > 0 {
 			data = append(m.utf8Remainder, data...)
@@ -270,6 +270,12 @@ func (m *Manager) readLoop(pty gopty.Pty) {
 		}
 
 		m.buffer.Write(data)
+
+		// Check buffer for ready marker after writing
+		if !m.ready && bytes.Contains(m.buffer.Bytes(), readyMarker) {
+			m.ready = true
+			go m.flushQueue()
+		}
 
 		if m.onOutput != nil {
 			m.onOutput(data)
@@ -294,8 +300,6 @@ func (m *Manager) flushQueue() {
 
 	combined := m.combineQueue()
 	m.queue = nil
-
-	otel.Info(context.Background(), "flushing queue", otel.Attr{"len", len(combined)})
 	m.writeAndSubmit(combined)
 }
 

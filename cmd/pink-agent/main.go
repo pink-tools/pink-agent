@@ -106,10 +106,15 @@ Store flags:
 		IPCHandler: func(cmd string) string {
 			switch {
 			case cmd == "getContextTokens":
-				if ptyManager == nil {
+				if ptyManager == nil || stateManager == nil {
 					return "0"
 				}
+				// Temporarily resize to wide terminal to get full status line
+				oldCols, oldRows := stateManager.GetTerminalSize()
+				ptyManager.Resize(200, 50)
+				time.Sleep(100 * time.Millisecond)
 				tokens := ptyManager.Tokens()
+				ptyManager.Resize(oldCols, oldRows)
 				if tokens == "" {
 					return "0"
 				}
