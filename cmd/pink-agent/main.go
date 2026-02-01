@@ -24,6 +24,7 @@ import (
 var version = "dev"
 var ptyManager *claude.Manager
 var stateManager *projects.Manager
+var fileStore *projects.FileStore
 var wsServer *websocket.Server
 
 const (
@@ -176,9 +177,23 @@ Store flags:
 				if err := stateManager.CreatePendingSession(name, pendingID); err != nil {
 					return "ERROR:" + err.Error()
 				}
+				// Build project context: base from PROJECT.md + optional prompt
+				projectCtx := ""
+				if fileStore != nil {
+					if content, err := fileStore.Get(project.ID, "PROJECT.md"); err == nil {
+						projectCtx = string(content)
+					}
+				}
+				if params.Prompt != "" {
+					if projectCtx != "" {
+						projectCtx = projectCtx + "\n\n" + params.Prompt
+					} else {
+						projectCtx = params.Prompt
+					}
+				}
 				// Create session async
-				go func(projectName, prompt string) {
-					realID, err := claude.CreateSession(projectName, prompt)
+				go func(projectName, ctx string) {
+					realID, err := claude.CreateSession(projectName, ctx)
 					if err != nil {
 						stateManager.CancelPendingSession(pendingID)
 						return
@@ -187,7 +202,7 @@ Store flags:
 					if ptyManager != nil {
 						ptyManager.Start()
 					}
-				}(project.Name, params.Prompt)
+				}(project.Name, projectCtx)
 				return "OK"
 
 			default:
@@ -221,7 +236,7 @@ func runDaemon(ctx context.Context, dataDir string) error {
 
 	// Initialize store
 	storePath := filepath.Join(dataDir, "store")
-	fileStore := projects.NewFileStore(storePath)
+	fileStore = projects.NewFileStore(storePath)
 
 	// Initialize PTY manager
 	mcpConfig := filepath.Join(dataDir, "mcp-config.json")
