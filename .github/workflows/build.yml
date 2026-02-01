@@ -59,6 +59,7 @@ jobs:
           cache: false
 
       - name: Build
+        shell: bash
         run: go build -ldflags="-X main.version=${GITHUB_REF_NAME#v}" -o pink-agent-windows-amd64.exe ./cmd/pink-agent
 
       - name: Test run
