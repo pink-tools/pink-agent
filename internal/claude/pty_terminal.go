@@ -233,9 +233,7 @@ func (m *Manager) readLoop(pty gopty.Pty) {
 	for {
 		n, err := pty.Read(buf)
 		if err != nil {
-			otel.Info(context.Background(), "readLoop ended", otel.Attr{"error", err.Error()})
-			// Check if process exited with error
-			// Save to local var to avoid race with Stop()
+			// Check if process exited with error (not from Stop())
 			cmd := m.cmd
 			if cmd != nil {
 				cmd.Wait()
