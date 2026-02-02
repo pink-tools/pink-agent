@@ -15,7 +15,7 @@ require github.com/joho/godotenv v1.5.1 // indirect
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/creack/pty v1.1.24 // indirect
-	github.com/pink-tools/pink-core v1.7.1
+	github.com/pink-tools/pink-core v1.7.2
 	github.com/u-root/u-root v0.11.0 // indirect
 	go.opentelemetry.io/otel v1.39.0 // indirect
 	go.opentelemetry.io/otel/trace v1.39.0 // indirect
