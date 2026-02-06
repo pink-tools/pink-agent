@@ -5,37 +5,23 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/google/uuid"
 )
 
-// Errors
 var (
-	ErrProjectNotFound     = errors.New("project not found")
-	ErrSessionNotFound     = errors.New("session not found")
-	ErrNoActiveProject     = errors.New("no active project")
-	ErrNoActiveSession     = errors.New("no active session, create one in the Mini App first")
-	ErrOperationInProgress = errors.New("operation in progress")
+	ErrProjectNotFound = errors.New("project not found")
+	ErrSessionNotFound = errors.New("session not found")
+	ErrNoActiveProject = errors.New("no active project")
+	ErrNoActiveSession = errors.New("no active session, create one in the Mini App first")
 )
 
-// SessionStatus represents the current state of a session
-type SessionStatus string
-
-const (
-	SessionStatusCreating   SessionStatus = "creating"
-	SessionStatusReady      SessionStatus = "ready"
-	SessionStatusCompacting SessionStatus = "compacting"
-)
-
-// Session represents a Claude Code session
+// Session represents a ready Claude Code session.
+// Only persisted sessions appear here — no transient states on disk.
 type Session struct {
-	ClaudeID string        `json:"claudeId"`
-	Name     string        `json:"name"`
-	Status   SessionStatus `json:"status"`
-}
-
-func (s *Session) IsReady() bool {
-	return s.Status == SessionStatusReady
+	ClaudeID string `json:"claudeId"`
+	Name     string `json:"name"`
 }
 
 // Project represents a project containing sessions
@@ -62,23 +48,13 @@ func (p *Project) GetActiveSession() *Session {
 	return p.GetSession(p.ActiveSession)
 }
 
-// State represents the application state
+// State represents the persisted application state.
+// Only contains valid, complete data — never transient operations.
 type State struct {
 	ActiveProject string    `json:"activeProject"`
 	Projects      []Project `json:"projects"`
 	Cols          uint16    `json:"cols"`
 	Rows          uint16    `json:"rows"`
-}
-
-func (s *State) IsIdle() bool {
-	for _, p := range s.Projects {
-		for _, sess := range p.Sessions {
-			if sess.Status == SessionStatusCreating || sess.Status == SessionStatusCompacting {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 func (s *State) GetProject(id string) *Project {
@@ -122,6 +98,17 @@ func (s *State) Clone() *State {
 		copy(clone.Projects[i].Sessions, p.Sessions)
 	}
 	return clone
+}
+
+// AllSessions returns all session IDs across all projects
+func (s *State) AllSessions() []string {
+	var ids []string
+	for _, p := range s.Projects {
+		for _, sess := range p.Sessions {
+			ids = append(ids, sess.ClaudeID)
+		}
+	}
+	return ids
 }
 
 // Storage interface for state persistence
@@ -174,21 +161,42 @@ func (s *FileStorage) Save(state *State) error {
 	return os.Rename(tmp, s.path)
 }
 
-// Manager handles state mutations
+// PendingSession represents an in-memory session being created.
+// Never persisted to disk — crash = lost, not corrupted.
+type PendingSession struct {
+	ID        string `json:"id"`
+	ProjectID string `json:"projectId"`
+	Name      string `json:"name"`
+	Error     string `json:"error,omitempty"`
+}
+
+// Manager handles state mutations.
+// Persisted state uses clone-modify-save pattern.
+// Pending sessions live in memory only.
 type Manager struct {
 	state    *State
 	storage  Storage
-	onChange func(*State)
+	onChange func(*State, []PendingSession)
+
+	mu       sync.Mutex
+	pending  []PendingSession
 }
 
-// SetOnChange registers a callback for state changes
-func (m *Manager) SetOnChange(fn func(*State)) {
+func NewManager(storage Storage) (*Manager, error) {
+	state, err := storage.Load()
+	if err != nil {
+		return nil, err
+	}
+	return &Manager{state: state, storage: storage}, nil
+}
+
+func (m *Manager) SetOnChange(fn func(*State, []PendingSession)) {
 	m.onChange = fn
 }
 
 func (m *Manager) notifyChange() {
 	if m.onChange != nil {
-		m.onChange(m.state)
+		m.onChange(m.state, m.pending)
 	}
 }
 
@@ -201,27 +209,25 @@ func (m *Manager) save(newState *State) error {
 	return nil
 }
 
-func NewManager(storage Storage) (*Manager, error) {
-	state, err := storage.Load()
-	if err != nil {
-		return nil, err
-	}
-	return &Manager{state: state, storage: storage}, nil
-}
-
 func (m *Manager) State() *State {
 	return m.state
+}
+
+func (m *Manager) PendingSessions() []PendingSession {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]PendingSession, len(m.pending))
+	copy(result, m.pending)
+	return result
 }
 
 func (m *Manager) GetActiveSession() *Session {
 	return m.state.GetActiveSession()
 }
 
-func (m *Manager) CreateProject(name string) error {
-	if !m.state.IsIdle() {
-		return ErrOperationInProgress
-	}
+// --- Projects ---
 
+func (m *Manager) CreateProject(name string) error {
 	newState := m.state.Clone()
 	project := Project{
 		ID:   uuid.New().String(),
@@ -234,10 +240,6 @@ func (m *Manager) CreateProject(name string) error {
 }
 
 func (m *Manager) DeleteProject(id string) error {
-	if !m.state.IsIdle() {
-		return ErrOperationInProgress
-	}
-
 	newState := m.state.Clone()
 	idx := -1
 	for i, p := range newState.Projects {
@@ -264,10 +266,6 @@ func (m *Manager) DeleteProject(id string) error {
 }
 
 func (m *Manager) RenameProject(id, name string) error {
-	if !m.state.IsIdle() {
-		return ErrOperationInProgress
-	}
-
 	newState := m.state.Clone()
 	project := newState.GetProject(id)
 	if project == nil {
@@ -279,10 +277,6 @@ func (m *Manager) RenameProject(id, name string) error {
 }
 
 func (m *Manager) SwitchProject(id string) error {
-	if !m.state.IsIdle() {
-		return ErrOperationInProgress
-	}
-
 	newState := m.state.Clone()
 	if newState.GetProject(id) == nil {
 		return ErrProjectNotFound
@@ -292,11 +286,31 @@ func (m *Manager) SwitchProject(id string) error {
 	return m.save(newState)
 }
 
-func (m *Manager) DeleteSession(claudeID string) error {
-	if !m.state.IsIdle() {
-		return ErrOperationInProgress
+// --- Sessions ---
+
+// AddSession adds a ready session to a project and persists.
+// If the project has no active session, this becomes active.
+func (m *Manager) AddSession(projectID, claudeID, name string) error {
+	newState := m.state.Clone()
+	project := newState.GetProject(projectID)
+	if project == nil {
+		return ErrProjectNotFound
 	}
 
+	session := Session{
+		ClaudeID: claudeID,
+		Name:     name,
+	}
+	project.Sessions = append(project.Sessions, session)
+
+	if project.ActiveSession == "" {
+		project.ActiveSession = claudeID
+	}
+
+	return m.save(newState)
+}
+
+func (m *Manager) DeleteSession(claudeID string) error {
 	newState := m.state.Clone()
 	project := newState.GetActiveProject()
 	if project == nil {
@@ -328,10 +342,6 @@ func (m *Manager) DeleteSession(claudeID string) error {
 }
 
 func (m *Manager) RenameSession(claudeID, name string) error {
-	if !m.state.IsIdle() {
-		return ErrOperationInProgress
-	}
-
 	newState := m.state.Clone()
 	project := newState.GetActiveProject()
 	if project == nil {
@@ -347,14 +357,11 @@ func (m *Manager) RenameSession(claudeID, name string) error {
 	return m.save(newState)
 }
 
+// SwitchSession updates the active session pointer.
+// No PTY stop/start — all PTYs run concurrently.
 func (m *Manager) SwitchSession(claudeID string) error {
-	if !m.state.IsIdle() {
-		return ErrOperationInProgress
-	}
-
 	newState := m.state.Clone()
 
-	// Find session in any project
 	var targetProject *Project
 	for i := range newState.Projects {
 		if newState.Projects[i].GetSession(claudeID) != nil {
@@ -367,97 +374,8 @@ func (m *Manager) SwitchSession(claudeID string) error {
 		return ErrSessionNotFound
 	}
 
-	// Switch project if needed
 	newState.ActiveProject = targetProject.ID
 	targetProject.ActiveSession = claudeID
-
-	return m.save(newState)
-}
-
-func (m *Manager) CreatePendingSession(name, pendingID string) error {
-	if !m.state.IsIdle() {
-		return ErrOperationInProgress
-	}
-
-	newState := m.state.Clone()
-	project := newState.GetActiveProject()
-	if project == nil {
-		return ErrNoActiveProject
-	}
-
-	session := Session{
-		ClaudeID: pendingID,
-		Name:     name,
-		Status:   SessionStatusCreating,
-	}
-	project.Sessions = append(project.Sessions, session)
-	project.ActiveSession = pendingID
-
-	return m.save(newState)
-}
-
-func (m *Manager) FinishSession(pendingID, realClaudeID string) error {
-	newState := m.state.Clone()
-	project := newState.GetActiveProject()
-	if project == nil {
-		return ErrNoActiveProject
-	}
-
-	session := project.GetSession(pendingID)
-	if session == nil {
-		return ErrSessionNotFound
-	}
-
-	session.ClaudeID = realClaudeID
-	session.Status = SessionStatusReady
-	project.ActiveSession = realClaudeID
-
-	return m.save(newState)
-}
-
-func (m *Manager) CancelPendingSession(pendingID string) error {
-	newState := m.state.Clone()
-	project := newState.GetActiveProject()
-	if project == nil {
-		return ErrNoActiveProject
-	}
-
-	idx := -1
-	for i, s := range project.Sessions {
-		if s.ClaudeID == pendingID {
-			idx = i
-			break
-		}
-	}
-	if idx == -1 {
-		return ErrSessionNotFound
-	}
-
-	project.Sessions = append(project.Sessions[:idx], project.Sessions[idx+1:]...)
-
-	if project.ActiveSession == pendingID {
-		if len(project.Sessions) > 0 {
-			project.ActiveSession = project.Sessions[0].ClaudeID
-		} else {
-			project.ActiveSession = ""
-		}
-	}
-
-	return m.save(newState)
-}
-
-func (m *Manager) SetSessionStatus(claudeID string, status SessionStatus) error {
-	newState := m.state.Clone()
-	project := newState.GetActiveProject()
-	if project == nil {
-		return ErrNoActiveProject
-	}
-
-	session := project.GetSession(claudeID)
-	if session == nil {
-		return ErrSessionNotFound
-	}
-	session.Status = status
 
 	return m.save(newState)
 }
@@ -472,4 +390,82 @@ func (m *Manager) SetTerminalSize(cols, rows uint16) error {
 
 func (m *Manager) GetTerminalSize() (uint16, uint16) {
 	return m.state.Cols, m.state.Rows
+}
+
+// --- Pending Sessions (in-memory only) ---
+
+// AddPendingSession tracks a session being created. Not persisted.
+func (m *Manager) AddPendingSession(projectID, name string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	id := uuid.New().String()
+	m.pending = append(m.pending, PendingSession{
+		ID:        id,
+		ProjectID: projectID,
+		Name:      name,
+	})
+
+	m.notifyChange()
+	return id
+}
+
+// FinishPendingSession removes pending entry and adds ready session to state.
+func (m *Manager) FinishPendingSession(pendingID, claudeID string) error {
+	m.mu.Lock()
+	var found *PendingSession
+	for i, p := range m.pending {
+		if p.ID == pendingID {
+			found = &m.pending[i]
+			break
+		}
+	}
+	if found == nil {
+		m.mu.Unlock()
+		return ErrSessionNotFound
+	}
+
+	projectID := found.ProjectID
+	name := found.Name
+
+	// Remove from pending
+	for i, p := range m.pending {
+		if p.ID == pendingID {
+			m.pending = append(m.pending[:i], m.pending[i+1:]...)
+			break
+		}
+	}
+	m.mu.Unlock()
+
+	return m.AddSession(projectID, claudeID, name)
+}
+
+// FailPendingSession marks a pending session as failed with error message.
+func (m *Manager) FailPendingSession(pendingID, errorMsg string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for i := range m.pending {
+		if m.pending[i].ID == pendingID {
+			m.pending[i].Error = errorMsg
+			break
+		}
+	}
+
+	m.notifyChange()
+}
+
+// RemovePendingSession removes a pending session (user dismissed error).
+func (m *Manager) RemovePendingSession(pendingID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for i, p := range m.pending {
+		if p.ID == pendingID {
+			m.pending = append(m.pending[:i], m.pending[i+1:]...)
+			break
+		}
+	}
+
+	m.notifyChange()
 }

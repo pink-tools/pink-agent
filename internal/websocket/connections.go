@@ -31,30 +31,36 @@ const (
 // StateManager interface for state operations
 type StateManager interface {
 	State() *projects.State
+	PendingSessions() []projects.PendingSession
 	CreateProject(name string) error
 	DeleteProject(id string) error
 	RenameProject(id, name string) error
 	SwitchProject(id string) error
-	CreatePendingSession(name, pendingID string) error
-	FinishSession(pendingID, realClaudeID string) error
-	CancelPendingSession(pendingID string) error
+	AddSession(projectID, claudeID, name string) error
+	AddPendingSession(projectID, name string) string
+	FinishPendingSession(pendingID, claudeID string) error
+	FailPendingSession(pendingID, errorMsg string)
+	RemovePendingSession(pendingID string)
 	DeleteSession(claudeID string) error
 	RenameSession(claudeID, name string) error
 	SwitchSession(claudeID string) error
-	SetSessionStatus(claudeID string, status projects.SessionStatus) error
 	SetTerminalSize(cols, rows uint16) error
 }
 
 // PTYManager interface for PTY operations
 type PTYManager interface {
-	Write(text string) error
-	Buffer() []byte
-	Tokens() string
-	Resize(cols, rows uint16)
-	SendEscape()
-	Stop()
-	Start()
-	SetOutputHandler(fn func([]byte))
+	Write(sessionID, text string) error
+	Buffer(sessionID string) []byte
+	Tokens(sessionID string) string
+	Resize(sessionID string, cols, rows uint16)
+	ResizeAll(cols, rows uint16)
+	SendEscape(sessionID string)
+	StartSession(sessionID, name string)
+	StopSession(sessionID string)
+	StopAll()
+	SetOutputHandler(fn func(sessionID string, data []byte))
+	SetTerminalSize(cols, rows uint16)
+	IsRunning(sessionID string) bool
 }
 
 // Server handles WebSocket connections
@@ -85,7 +91,7 @@ func (s *Server) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		initData := r.URL.Query().Get("initData")
 		if err := validateTelegramAuth(initData, s.botToken, s.userID); err != nil {
-			otel.Warn(r.Context(), "websocket auth failed", otel.Attr{"error", err.Error()})
+			otel.Warn(r.Context(), "websocket auth failed", otel.Attr{K: "error", V: err.Error()})
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -100,7 +106,6 @@ func (s *Server) DevHandler() http.HandlerFunc {
 		s.handleConnection(r.Context(), w, r)
 	}
 }
-
 
 func (s *Server) handleConnection(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -117,7 +122,6 @@ func (s *Server) handleConnection(ctx context.Context, w http.ResponseWriter, r 
 
 	otel.Info(ctx, "mini app connected")
 
-	// Keepalive
 	conn.SetReadDeadline(time.Now().Add(pongWait))
 	conn.SetPongHandler(func(string) error {
 		conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -125,11 +129,13 @@ func (s *Server) handleConnection(ctx context.Context, w http.ResponseWriter, r 
 	})
 	go s.pingLoop(conn)
 
-	s.pty.SetOutputHandler(func(data []byte) {
-		s.sendEvent("terminal.output", string(data))
+	s.pty.SetOutputHandler(func(sessionID string, data []byte) {
+		s.sendEvent("terminal.output", map[string]string{
+			"sessionId": sessionID,
+			"data":      string(data),
+		})
 	})
 
-	// Don't activate session here - wait for resize → ready → activate flow
 	s.readLoop(ctx, conn)
 
 	otel.Info(ctx, "mini app disconnected")
@@ -169,7 +175,7 @@ func (s *Server) readLoop(ctx context.Context, conn *websocket.Conn) {
 	}
 }
 
-// Telegram Mini App auth validation (inlined from auth package)
+// Telegram Mini App auth validation
 type telegramUser struct {
 	ID int64 `json:"id"`
 }

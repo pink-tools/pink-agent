@@ -36,7 +36,7 @@ func (b *Bot) Start(ctx context.Context) {
 	config := tgbotapi.NewUpdate(0)
 	config.Timeout = 60
 
-	otel.Info(ctx, "telegram bot started", otel.Attr{"username", b.api.Self.UserName})
+	otel.Info(ctx, "telegram bot started", otel.Attr{K: "username", V: b.api.Self.UserName})
 
 	connected := true
 	for {

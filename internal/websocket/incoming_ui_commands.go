@@ -9,14 +9,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	otel "github.com/pink-tools/pink-otel"
 	"pink-agent/internal/claude"
 	"pink-agent/internal/projects"
 )
 
-// handleRequest processes incoming request and returns response
 func (s *Server) handleRequest(ctx context.Context, req Request) {
 	var err *Error
 
@@ -40,16 +38,14 @@ func (s *Server) handleRequest(ctx context.Context, req Request) {
 		err = s.handleSessionRename(ctx, req)
 	case "session.switch":
 		err = s.handleSessionSwitch(ctx, req)
-	case "session.compact":
-		err = s.handleSessionCompact(ctx, req)
+	case "session.pendingDismiss":
+		err = s.handlePendingDismiss(ctx, req)
 
 	// Terminal
 	case "terminal.resize":
 		err = s.handleTerminalResize(ctx, req)
 	case "terminal.cancel":
 		err = s.handleTerminalCancel(ctx, req)
-	case "terminal.activate":
-		err = s.handleTerminalActivate(ctx, req)
 
 	// Sync
 	case "sync.state":
@@ -80,7 +76,6 @@ func (s *Server) handleRequest(ctx context.Context, req Request) {
 	}
 }
 
-// mapError converts projects package errors to protocol errors
 func mapError(err error) *Error {
 	switch {
 	case errors.Is(err, projects.ErrProjectNotFound):
@@ -91,8 +86,6 @@ func mapError(err error) *Error {
 		return &Error{Code: ErrCodeNoActiveProject, Message: err.Error()}
 	case errors.Is(err, projects.ErrNoActiveSession):
 		return &Error{Code: ErrCodeNoActiveSession, Message: err.Error()}
-	case errors.Is(err, projects.ErrOperationInProgress):
-		return &Error{Code: ErrCodeOperationInProgress, Message: err.Error()}
 	default:
 		return &Error{Code: ErrCodeInternalError, Message: err.Error()}
 	}
@@ -110,7 +103,7 @@ func (s *Server) handleProjectCreate(ctx context.Context, req Request) *Error {
 		return mapError(err)
 	}
 
-	otel.Info(ctx, "project created", otel.Attr{"name", params.Name})
+	otel.Info(ctx, "project created", otel.Attr{K: "name", V: params.Name})
 	if project := s.state.State().GetActiveProject(); project != nil {
 		s.store.InitProjectContext(project.ID)
 	}
@@ -126,21 +119,19 @@ func (s *Server) handleProjectDelete(ctx context.Context, req Request) *Error {
 	projectName := ""
 	if p := s.state.State().GetProject(params.ID); p != nil {
 		projectName = p.Name
+		// Stop all PTYs for this project's sessions
+		for _, sess := range p.Sessions {
+			s.pty.StopSession(sess.ClaudeID)
+		}
 	}
 
-	s.pty.Stop()
 	s.store.DeleteProject(params.ID)
 
 	if err := s.state.DeleteProject(params.ID); err != nil {
 		return mapError(err)
 	}
 
-	otel.Info(ctx, "project deleted", otel.Attr{"name", projectName})
-
-	// Activate session in new active project if exists
-	if s.state.State().GetActiveSession() != nil {
-		s.activateSession()
-	}
+	otel.Info(ctx, "project deleted", otel.Attr{K: "name", V: projectName})
 	return nil
 }
 
@@ -168,8 +159,6 @@ func (s *Server) handleProjectSwitch(ctx context.Context, req Request) *Error {
 		fromProject = p.Name
 	}
 
-	s.pty.Stop()
-
 	if err := s.state.SwitchProject(params.ID); err != nil {
 		return mapError(err)
 	}
@@ -178,8 +167,15 @@ func (s *Server) handleProjectSwitch(ctx context.Context, req Request) *Error {
 	if p := s.state.State().GetActiveProject(); p != nil {
 		toProject = p.Name
 	}
-	otel.Info(ctx, "project switch", otel.Attr{"from", fromProject}, otel.Attr{"to", toProject})
-	s.activateSession()
+	otel.Info(ctx, "project switch", otel.Attr{K: "from", V: fromProject}, otel.Attr{K: "to", V: toProject})
+
+	// Send buffer of new active session
+	if sess := s.state.State().GetActiveSession(); sess != nil {
+		s.sendEvent("terminal.buffer", map[string]string{
+			"sessionId": sess.ClaudeID,
+			"data":      string(s.pty.Buffer(sess.ClaudeID)),
+		})
+	}
 	return nil
 }
 
@@ -201,28 +197,25 @@ func (s *Server) handleSessionCreate(ctx context.Context, req Request) *Error {
 		sessionName = fmt.Sprintf("Session %d", len(project.Sessions)+1)
 	}
 
-	pendingID := "pending-" + fmt.Sprintf("%d", time.Now().UnixNano())
-	if err := s.state.CreatePendingSession(sessionName, pendingID); err != nil {
-		return mapError(err)
-	}
+	pendingID := s.state.AddPendingSession(project.ID, sessionName)
 
-	go func(name, pending string) {
+	go func(projectID, name, pending string) {
 		projectName, projectCtx := s.getProjectInfo()
-		realClaudeID, createErr := claude.CreateSession(projectName, projectCtx)
-		if createErr != nil {
-			otel.Error(ctx, "create session failed", otel.Attr{"error", createErr.Error()})
-			s.state.CancelPendingSession(pending)
+		claudeID, err := claude.CreateSession(projectName, projectCtx)
+		if err != nil {
+			otel.Error(ctx, "create session failed", otel.Attr{K: "error", V: err.Error()})
+			s.state.FailPendingSession(pending, err.Error())
 			return
 		}
 
-		if err := s.state.FinishSession(pending, realClaudeID); err != nil {
-			otel.Error(ctx, "finish session failed", otel.Attr{"error", err.Error()})
+		if err := s.state.FinishPendingSession(pending, claudeID); err != nil {
+			otel.Error(ctx, "finish session failed", otel.Attr{K: "error", V: err.Error()})
 			return
 		}
 
-		otel.Info(ctx, "session created", otel.Attr{"name", name}, otel.Attr{"id", realClaudeID})
-		s.activateSession()
-	}(sessionName, pendingID)
+		otel.Info(ctx, "session created", otel.Attr{K: "name", V: name}, otel.Attr{K: "id", V: claudeID})
+		s.pty.StartSession(claudeID, name)
+	}(project.ID, sessionName, pendingID)
 
 	return nil
 }
@@ -234,29 +227,19 @@ func (s *Server) handleSessionDelete(ctx context.Context, req Request) *Error {
 	}
 
 	sessionName := ""
-	isActiveSession := false
 	if p := s.state.State().GetActiveProject(); p != nil {
 		if sess := p.GetSession(params.ClaudeID); sess != nil {
 			sessionName = sess.Name
 		}
-		isActiveSession = p.ActiveSession == params.ClaudeID
 	}
 
-	// Only stop PTY if deleting active session
-	if isActiveSession {
-		s.pty.Stop()
-	}
+	s.pty.StopSession(params.ClaudeID)
 
 	if err := s.state.DeleteSession(params.ClaudeID); err != nil {
 		return mapError(err)
 	}
 
-	otel.Info(ctx, "session deleted", otel.Attr{"name", sessionName})
-
-	// Only reactivate if we deleted the active session and there's another one
-	if isActiveSession && s.state.State().GetActiveSession() != nil {
-		s.activateSession()
-	}
+	otel.Info(ctx, "session deleted", otel.Attr{K: "name", V: sessionName})
 	return nil
 }
 
@@ -273,77 +256,34 @@ func (s *Server) handleSessionRename(ctx context.Context, req Request) *Error {
 	return nil
 }
 
+// handleSessionSwitch just updates the pointer and sends buffer.
+// No PTY stop/start — all run concurrently.
 func (s *Server) handleSessionSwitch(ctx context.Context, req Request) *Error {
 	var params SessionSwitchParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return &Error{Code: ErrCodeInvalidParams, Message: err.Error()}
 	}
 
-	fromSession := ""
-	if sess := s.state.State().GetActiveSession(); sess != nil {
-		fromSession = sess.Name
-	}
-
-	s.pty.Stop()
-
 	if err := s.state.SwitchSession(params.ClaudeID); err != nil {
 		return mapError(err)
 	}
 
-	toSession := ""
-	if sess := s.state.State().GetActiveSession(); sess != nil {
-		toSession = sess.Name
-	}
-	otel.Info(ctx, "session switch", otel.Attr{"from", fromSession}, otel.Attr{"to", toSession})
-	s.activateSession()
+	otel.Info(ctx, "session switch", otel.Attr{K: "sessionId", V: params.ClaudeID[:8]})
+
+	s.sendEvent("terminal.buffer", map[string]string{
+		"sessionId": params.ClaudeID,
+		"data":      string(s.pty.Buffer(params.ClaudeID)),
+	})
 	return nil
 }
 
-func (s *Server) handleSessionCompact(ctx context.Context, req Request) *Error {
-	state := s.state.State()
-	project := state.GetActiveProject()
-	if project == nil {
-		return &Error{Code: ErrCodeNoActiveProject, Message: "no active project"}
-	}
-	session := project.GetActiveSession()
-	if session == nil {
-		return &Error{Code: ErrCodeNoActiveSession, Message: projects.ErrNoActiveSession.Error()}
+func (s *Server) handlePendingDismiss(ctx context.Context, req Request) *Error {
+	var params PendingDismissParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return &Error{Code: ErrCodeInvalidParams, Message: err.Error()}
 	}
 
-	if err := s.state.SetSessionStatus(session.ClaudeID, projects.SessionStatusCompacting); err != nil {
-		otel.Error(ctx, "compact set status failed", otel.Attr{"error", err.Error()})
-		return mapError(err)
-	}
-
-	s.pty.Stop()
-
-	oldClaudeID := session.ClaudeID
-	sessionName := session.Name + " (C)"
-
-	go func() {
-		summary, sumErr := claude.Summarize(oldClaudeID)
-		if sumErr != nil {
-			otel.Error(ctx, "compact summarize failed", otel.Attr{"error", sumErr.Error()})
-			s.state.SetSessionStatus(oldClaudeID, projects.SessionStatusReady)
-			return
-		}
-
-		_, projectCtx := s.getProjectInfo()
-		newClaudeID, createErr := claude.CreateWithTakeover(summary, projectCtx)
-		if createErr != nil {
-			otel.Error(ctx, "compact create failed", otel.Attr{"error", createErr.Error()})
-			s.state.SetSessionStatus(oldClaudeID, projects.SessionStatusReady)
-			return
-		}
-
-		s.state.DeleteSession(oldClaudeID)
-
-		pendingID := "pending-" + fmt.Sprintf("%d", time.Now().UnixNano())
-		s.state.CreatePendingSession(sessionName, pendingID)
-		s.state.FinishSession(pendingID, newClaudeID)
-		s.activateSession()
-	}()
-
+	s.state.RemovePendingSession(params.ID)
 	return nil
 }
 
@@ -356,30 +296,38 @@ func (s *Server) handleTerminalResize(ctx context.Context, req Request) *Error {
 	}
 
 	s.state.SetTerminalSize(params.Cols, params.Rows)
-	s.pty.Resize(params.Cols, params.Rows)
+	s.pty.SetTerminalSize(params.Cols, params.Rows)
 	s.sendEvent("terminal.ready", struct{}{})
 	return nil
 }
 
 func (s *Server) handleTerminalCancel(ctx context.Context, req Request) *Error {
-	s.pty.SendEscape()
-	return nil
-}
+	var params TerminalCancelParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return &Error{Code: ErrCodeInvalidParams, Message: err.Error()}
+	}
 
-func (s *Server) handleTerminalActivate(ctx context.Context, req Request) *Error {
-	s.activateSession()
+	s.pty.SendEscape(params.SessionID)
 	return nil
 }
 
 // Sync handlers
 
 func (s *Server) handleSyncState(ctx context.Context, req Request) *Error {
-	s.sendEvent("state", s.state.State())
+	s.BroadcastState(s.state.State(), s.state.PendingSessions())
 	return nil
 }
 
 func (s *Server) handleSyncBuffer(ctx context.Context, req Request) *Error {
-	s.sendEvent("terminal.buffer", string(s.pty.Buffer()))
+	var params SyncBufferParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return &Error{Code: ErrCodeInvalidParams, Message: err.Error()}
+	}
+
+	s.sendEvent("terminal.buffer", map[string]string{
+		"sessionId": params.SessionID,
+		"data":      string(s.pty.Buffer(params.SessionID)),
+	})
 	return nil
 }
 
@@ -447,7 +395,6 @@ func (s *Server) handleStoreDelete(ctx context.Context, req Request) *Error {
 		return &Error{Code: ErrCodeStoreError, Message: err.Error()}
 	}
 
-	// Send updated file list
 	s.broadcastStoreList()
 	return nil
 }
@@ -500,7 +447,6 @@ func (s *Server) handleStoreSend(ctx context.Context, req Request) *Error {
 	return nil
 }
 
-// isTextFile checks if file extension indicates a text file
 func isTextFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	textExts := map[string]bool{

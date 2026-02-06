@@ -28,7 +28,7 @@ func projectList() error {
 	}
 
 	if strings.HasPrefix(response, "ERROR:") {
-		return fmt.Errorf(strings.TrimPrefix(response, "ERROR:"))
+		return fmt.Errorf("%s", strings.TrimPrefix(response, "ERROR:"))
 	}
 
 	var state sessionState

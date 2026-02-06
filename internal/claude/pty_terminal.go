@@ -14,7 +14,6 @@ import (
 	core "github.com/pink-tools/pink-core"
 	otel "github.com/pink-tools/pink-otel"
 	"pink-agent/internal/platform"
-	"pink-agent/internal/projects"
 )
 
 var readyMarker = []byte("tokens")
@@ -22,97 +21,76 @@ var numberRe = regexp.MustCompile(`\d+`)
 
 const inputDelay = 250 * time.Millisecond
 
-type StateProvider interface {
-	GetActiveSession() *projects.Session
-	GetTerminalSize() (uint16, uint16)
-}
-
-type Manager struct {
-	state     StateProvider
-	mcpConfig string
-
+// Terminal is a single PTY process for one Claude Code session
+type Terminal struct {
 	sessionID     string
+	name          string
 	pty           gopty.Pty
 	cmd           *gopty.Cmd
 	buffer        *RingBuffer
 	ready         bool
 	queue         []string
-	onOutput      func([]byte)
+	onOutput      func(string, []byte) // sessionID, data
 	utf8Remainder []byte
 	mu            sync.Mutex
 }
 
-func NewManager(state StateProvider, mcpConfig string) *Manager {
-	return &Manager{
-		state:     state,
-		mcpConfig: mcpConfig,
-		buffer:    NewRingBuffer(10 * 1024 * 1024), // 10MB
-	}
-}
+func (t *Terminal) Write(text string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
-func (m *Manager) Write(text string) error {
-	session := m.state.GetActiveSession()
-	if session == nil {
-		return projects.ErrNoActiveSession
+	if !t.isRunning() {
+		return errors.New("terminal not running")
 	}
 
-	// If PTY not running or wrong session, start with this message already in queue
-	// This prevents race condition where flushQueue runs before we add to queue
-	if !m.isRunning() || m.sessionID != session.ClaudeID {
-		m.startWithMessage(session.ClaudeID, text)
+	if !t.ready {
+		t.queue = append(t.queue, text)
 		return nil
 	}
 
-	if !m.ready {
-		m.queue = append(m.queue, text)
-		return nil
-	}
-
-	return m.writeToPTY(text)
+	return t.writeToPTY(text)
 }
 
-func (m *Manager) writeToPTY(text string) error {
-	if m.pty == nil {
+func (t *Terminal) writeToPTY(text string) error {
+	if t.pty == nil {
 		return errors.New("pty not running")
 	}
-	m.writeAndSubmit(text)
+	t.writeAndSubmit(text)
 	return nil
 }
 
-func (m *Manager) writeAndSubmit(text string) {
-	if m.pty == nil {
-		otel.Error(context.Background(), "writeAndSubmit: pty is nil")
+func (t *Terminal) writeAndSubmit(text string) {
+	if t.pty == nil {
+		otel.Error(context.Background(), "writeAndSubmit: pty is nil", otel.Attr{K: "sessionID", V: t.sessionID[:8]})
 		return
 	}
-	m.pty.Write([]byte(text))
+	t.pty.Write([]byte(text))
 	time.Sleep(inputDelay)
-	m.pty.Write([]byte("\r"))
+	t.pty.Write([]byte("\r"))
 }
 
-func (m *Manager) Resize(cols, rows uint16) {
-	if m.pty != nil {
-		m.pty.Resize(int(cols), int(rows))
+func (t *Terminal) Resize(cols, rows uint16) {
+	if t.pty != nil {
+		t.pty.Resize(int(cols), int(rows))
 	}
 }
 
-func (m *Manager) SendEscape() {
-	if m.pty != nil {
-		m.pty.Write([]byte{0x1b}) // ESC
+func (t *Terminal) SendEscape() {
+	if t.pty != nil {
+		t.pty.Write([]byte{0x1b})
 	}
 }
 
-func (m *Manager) Buffer() []byte {
-	return m.buffer.Bytes()
+func (t *Terminal) Buffer() []byte {
+	return t.buffer.Bytes()
 }
 
-// Tokens returns current token count from PTY buffer
-func (m *Manager) Tokens() string {
-	buf := m.buffer.Bytes()
+func (t *Terminal) Tokens() string {
+	buf := t.buffer.Bytes()
 	idx := bytes.LastIndex(buf, readyMarker)
 	if idx == -1 {
 		return ""
 	}
-	// Find last number before "tokens"
 	before := buf[:idx]
 	matches := numberRe.FindAll(before, -1)
 	if len(matches) == 0 {
@@ -121,88 +99,158 @@ func (m *Manager) Tokens() string {
 	return string(matches[len(matches)-1])
 }
 
-func (m *Manager) SetOutputHandler(fn func([]byte)) {
+func (t *Terminal) isRunning() bool {
+	if t.cmd == nil || t.cmd.Process == nil {
+		return false
+	}
+	return t.cmd.ProcessState == nil
+}
+
+func (t *Terminal) stop() {
+	if t.cmd == nil {
+		return
+	}
+
+	otel.Info(context.Background(), "session stopping", otel.Attr{K: "name", V: t.name})
+
+	if t.cmd.Process != nil {
+		t.cmd.Process.Kill()
+		go t.cmd.Wait()
+	}
+	if t.pty != nil {
+		t.pty.Close()
+	}
+	t.cmd = nil
+	t.pty = nil
+	t.ready = false
+}
+
+func (t *Terminal) readLoop(pty gopty.Pty) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := pty.Read(buf)
+		if err != nil {
+			cmd := t.cmd
+			if cmd != nil {
+				cmd.Wait()
+				if cmd.ProcessState != nil && !cmd.ProcessState.Success() {
+					otel.Error(context.Background(), "claude exited with error",
+						otel.Attr{K: "exitCode", V: cmd.ProcessState.ExitCode()},
+						otel.Attr{K: "sessionID", V: t.sessionID[:8]},
+					)
+				}
+			}
+			return
+		}
+
+		data := make([]byte, n)
+		copy(data, buf[:n])
+
+		if len(t.utf8Remainder) > 0 {
+			data = append(t.utf8Remainder, data...)
+			t.utf8Remainder = nil
+		}
+
+		validEnd := findValidUTF8End(data)
+		if validEnd < len(data) {
+			t.utf8Remainder = make([]byte, len(data)-validEnd)
+			copy(t.utf8Remainder, data[validEnd:])
+			data = data[:validEnd]
+		}
+
+		if len(data) == 0 {
+			continue
+		}
+
+		t.buffer.Write(data)
+
+		if !t.ready && bytes.Contains(t.buffer.Bytes(), readyMarker) {
+			t.ready = true
+			go t.flushQueue()
+		}
+
+		if t.onOutput != nil {
+			t.onOutput(t.sessionID, data)
+		}
+	}
+}
+
+func (t *Terminal) flushQueue() {
+	otel.Info(context.Background(), "session ready", otel.Attr{K: "name", V: t.name}, otel.Attr{K: "queueLen", V: len(t.queue)})
+
+	if len(t.queue) == 0 {
+		return
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	t.mu.Lock()
+	combined := strings.Join(t.queue, "\n")
+	t.queue = nil
+	t.mu.Unlock()
+
+	t.writeAndSubmit(combined)
+}
+
+// Manager manages all Terminal instances
+type Manager struct {
+	terminals map[string]*Terminal
+	mcpConfig string
+	cols      uint16
+	rows      uint16
+	onOutput  func(string, []byte)
+	mu        sync.Mutex
+}
+
+func NewManager(mcpConfig string) *Manager {
+	return &Manager{
+		terminals: make(map[string]*Terminal),
+		mcpConfig: mcpConfig,
+	}
+}
+
+func (m *Manager) SetOutputHandler(fn func(sessionID string, data []byte)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.onOutput = fn
 }
 
-func (m *Manager) Stop() {
+func (m *Manager) SetTerminalSize(cols, rows uint16) {
+	m.mu.Lock()
+	m.cols = cols
+	m.rows = rows
+	m.mu.Unlock()
+	m.ResizeAll(cols, rows)
+}
+
+func (m *Manager) StartSession(sessionID, name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.cmd == nil {
-		return
+	// Stop existing terminal for this session if any
+	if t, ok := m.terminals[sessionID]; ok {
+		t.stop()
 	}
 
-	// Log session stopping
-	if session := m.state.GetActiveSession(); session != nil {
-		otel.Info(context.Background(), "session stopping", otel.Attr{"name", session.Name})
+	t := &Terminal{
+		sessionID: sessionID,
+		name:      name,
+		buffer:    NewRingBuffer(10 * 1024 * 1024),
+		onOutput:  m.onOutput,
 	}
 
-	if m.cmd.Process != nil {
-		m.cmd.Process.Kill()
-		go m.cmd.Wait()
-	}
-	if m.pty != nil {
-		m.pty.Close()
-	}
-	m.cmd = nil
-	m.pty = nil
-	m.ready = false
-}
+	otel.Info(context.Background(), "session starting", otel.Attr{K: "name", V: name})
 
-func (m *Manager) Start() {
-	session := m.state.GetActiveSession()
-	if session == nil {
-		return
-	}
-	if !m.isRunning() || m.sessionID != session.ClaudeID {
-		m.start(session.ClaudeID)
-	}
-}
-
-func (m *Manager) isRunning() bool {
-	if m.cmd == nil || m.cmd.Process == nil {
-		return false
-	}
-	return m.cmd.ProcessState == nil
-}
-
-func (m *Manager) start(sessionID string) {
-	m.startWithMessage(sessionID, "")
-}
-
-func (m *Manager) startWithMessage(sessionID string, initialMessage string) {
-	m.Stop()
-
-	m.sessionID = sessionID
-	m.ready = false
-	if initialMessage != "" {
-		m.queue = []string{initialMessage}
-	} else {
-		m.queue = nil
-	}
-	m.buffer.Clear()
-	m.utf8Remainder = nil
-
-	// Log session starting
-	sessionName := sessionID[:8] // fallback to truncated ID
-	if session := m.state.GetActiveSession(); session != nil {
-		sessionName = session.Name
-	}
-	otel.Info(context.Background(), "session starting", otel.Attr{"name", sessionName})
-
-	cols, rows := m.state.GetTerminalSize()
-
-	// Create PTY
 	p, err := gopty.New()
 	if err != nil {
-		otel.Error(context.Background(), "failed to create pty", otel.Attr{"error", err.Error()}, otel.Attr{"sessionID", sessionID})
+		otel.Error(context.Background(), "failed to create pty", otel.Attr{K: "error", V: err.Error()}, otel.Attr{K: "sessionID", V: sessionID})
 		return
 	}
 
-	p.Resize(int(cols), int(rows))
+	if m.cols > 0 && m.rows > 0 {
+		p.Resize(int(m.cols), int(m.rows))
+	}
 
-	// Build command
 	command, prefixArgs := platform.ClaudeExecutable()
 	args := append(prefixArgs, "--resume", sessionID, "--dangerously-skip-permissions")
 	if m.mcpConfig != "" {
@@ -213,96 +261,112 @@ func (m *Manager) startWithMessage(sessionID string, initialMessage string) {
 
 	cmd := p.Command(command, args...)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
-
 	cmd.Dir = core.BaseDir()
 
 	if err := cmd.Start(); err != nil {
-		otel.Error(context.Background(), "failed to start pty command", otel.Attr{"error", err.Error()}, otel.Attr{"sessionID", sessionID}, otel.Attr{"command", command}, otel.Attr{"args", args})
+		otel.Error(context.Background(), "failed to start pty command", otel.Attr{K: "error", V: err.Error()}, otel.Attr{K: "sessionID", V: sessionID}, otel.Attr{K: "command", V: command})
 		p.Close()
 		return
 	}
 
-	m.pty = p
-	m.cmd = cmd
+	t.pty = p
+	t.cmd = cmd
+	m.terminals[sessionID] = t
 
-	go m.readLoop(p)
+	go t.readLoop(p)
 }
 
-func (m *Manager) readLoop(pty gopty.Pty) {
-	buf := make([]byte, 4096)
-	for {
-		n, err := pty.Read(buf)
-		if err != nil {
-			// Check if process exited with error (not from Stop())
-			cmd := m.cmd
-			if cmd != nil {
-				cmd.Wait()
-				if cmd.ProcessState != nil && !cmd.ProcessState.Success() {
-					otel.Error(context.Background(), "claude exited with error",
-						otel.Attr{"exitCode", cmd.ProcessState.ExitCode()},
-						otel.Attr{"sessionID", m.sessionID[:8]},
-					)
-				}
-			}
-			return
-		}
+func (m *Manager) StopSession(sessionID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-		data := make([]byte, n)
-		copy(data, buf[:n])
-
-		// Handle UTF-8 boundaries
-		if len(m.utf8Remainder) > 0 {
-			data = append(m.utf8Remainder, data...)
-			m.utf8Remainder = nil
-		}
-
-		validEnd := findValidUTF8End(data)
-		if validEnd < len(data) {
-			m.utf8Remainder = make([]byte, len(data)-validEnd)
-			copy(m.utf8Remainder, data[validEnd:])
-			data = data[:validEnd]
-		}
-
-		if len(data) == 0 {
-			continue
-		}
-
-		m.buffer.Write(data)
-
-		// Check buffer for ready marker after writing
-		if !m.ready && bytes.Contains(m.buffer.Bytes(), readyMarker) {
-			m.ready = true
-			go m.flushQueue()
-		}
-
-		if m.onOutput != nil {
-			m.onOutput(data)
-		}
+	if t, ok := m.terminals[sessionID]; ok {
+		t.stop()
+		delete(m.terminals, sessionID)
 	}
 }
 
-func (m *Manager) flushQueue() {
-	// Log session ready
-	sessionName := m.sessionID[:8]
-	if session := m.state.GetActiveSession(); session != nil {
-		sessionName = session.Name
+func (m *Manager) StopAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for id, t := range m.terminals {
+		t.stop()
+		delete(m.terminals, id)
 	}
-	otel.Info(context.Background(), "session ready", otel.Attr{"name", sessionName}, otel.Attr{"queueLen", len(m.queue)})
-
-	if len(m.queue) == 0 {
-		return
-	}
-
-	// Small delay after tokens marker
-	time.Sleep(500 * time.Millisecond)
-
-	combined := m.combineQueue()
-	m.queue = nil
-	m.writeAndSubmit(combined)
 }
 
-func (m *Manager) combineQueue() string {
-	return strings.Join(m.queue, "\n")
+func (m *Manager) Write(sessionID, text string) error {
+	m.mu.Lock()
+	t, ok := m.terminals[sessionID]
+	m.mu.Unlock()
+
+	if !ok {
+		return errors.New("no terminal for session " + sessionID[:8])
+	}
+	return t.Write(text)
+}
+
+func (m *Manager) Resize(sessionID string, cols, rows uint16) {
+	m.mu.Lock()
+	t, ok := m.terminals[sessionID]
+	m.mu.Unlock()
+
+	if ok {
+		t.Resize(cols, rows)
+	}
+}
+
+func (m *Manager) ResizeAll(cols, rows uint16) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, t := range m.terminals {
+		t.Resize(cols, rows)
+	}
+}
+
+func (m *Manager) SendEscape(sessionID string) {
+	m.mu.Lock()
+	t, ok := m.terminals[sessionID]
+	m.mu.Unlock()
+
+	if ok {
+		t.SendEscape()
+	}
+}
+
+func (m *Manager) Buffer(sessionID string) []byte {
+	m.mu.Lock()
+	t, ok := m.terminals[sessionID]
+	m.mu.Unlock()
+
+	if ok {
+		return t.Buffer()
+	}
+	return nil
+}
+
+func (m *Manager) Tokens(sessionID string) string {
+	m.mu.Lock()
+	t, ok := m.terminals[sessionID]
+	m.mu.Unlock()
+
+	if ok {
+		return t.Tokens()
+	}
+	return ""
+}
+
+func (m *Manager) IsRunning(sessionID string) bool {
+	m.mu.Lock()
+	t, ok := m.terminals[sessionID]
+	m.mu.Unlock()
+
+	if ok {
+		return t.isRunning()
+	}
+	return false
 }
 
 // RingBuffer is a simple circular buffer
@@ -345,7 +409,6 @@ func (r *RingBuffer) Clear() {
 	r.full = false
 }
 
-// findValidUTF8End returns index of last complete UTF-8 sequence.
 func findValidUTF8End(data []byte) int {
 	if len(data) == 0 {
 		return 0

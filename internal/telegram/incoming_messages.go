@@ -47,9 +47,9 @@ func (h *Handlers) HandleMessage(text string, files []string) string {
 	if len(preview) > 50 {
 		preview = preview[:50] + "..."
 	}
-	attrs := []otel.Attr{{"text", preview}}
+	attrs := []otel.Attr{{K: "text", V: preview}}
 	if len(files) > 0 {
-		attrs = append(attrs, otel.Attr{"files", len(files)})
+		attrs = append(attrs, otel.Attr{K: "files", V: len(files)})
 	}
 	otel.Info(context.Background(), "message received", attrs...)
 
@@ -76,7 +76,7 @@ func (h *Handlers) HandleVoice(audioPath string) (transcribed string, errMsg str
 	if len(preview) > 50 {
 		preview = preview[:50] + "..."
 	}
-	otel.Info(context.Background(), "message received", otel.Attr{"text", "🎤 " + preview})
+	otel.Info(context.Background(), "message received", otel.Attr{K: "text", V: "🎤 " + preview})
 
 	voicePrefix := "[VOICE INPUT: May contain speech recognition errors. Ask for clarification if unclear.] "
 	if err := h.pty.Write(voicePrefix + text); err != nil {

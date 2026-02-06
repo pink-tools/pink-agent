@@ -8,11 +8,9 @@ const (
 	ErrCodeSessionNotFound     = "SESSION_NOT_FOUND"
 	ErrCodeNoActiveProject     = "NO_ACTIVE_PROJECT"
 	ErrCodeNoActiveSession     = "NO_ACTIVE_SESSION"
-	ErrCodeOperationInProgress = "OPERATION_IN_PROGRESS"
 	ErrCodeInvalidParams       = "INVALID_PARAMS"
 	ErrCodeInternalError       = "INTERNAL_ERROR"
 	ErrCodeSessionCreateFailed = "SESSION_CREATE_FAILED"
-	ErrCodeCompactFailed       = "COMPACT_FAILED"
 	ErrCodeStoreError          = "STORE_ERROR"
 	ErrCodePreviewNotAvailable = "PREVIEW_NOT_AVAILABLE"
 )
@@ -79,9 +77,21 @@ type SessionSwitchParams struct {
 	ClaudeID string `json:"claudeId"`
 }
 
+type PendingDismissParams struct {
+	ID string `json:"id"`
+}
+
 type TerminalResizeParams struct {
 	Cols uint16 `json:"cols"`
 	Rows uint16 `json:"rows"`
+}
+
+type TerminalCancelParams struct {
+	SessionID string `json:"sessionId"`
+}
+
+type SyncBufferParams struct {
+	SessionID string `json:"sessionId"`
 }
 
 type StoreGetParams struct {

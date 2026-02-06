@@ -23,7 +23,6 @@ type project struct {
 type session struct {
 	ClaudeID string `json:"claudeId"`
 	Name     string `json:"name"`
-	Status   string `json:"status"`
 }
 
 func HandleSession(args []string) error {
@@ -61,7 +60,7 @@ func sessionList() error {
 	}
 
 	if strings.HasPrefix(response, "ERROR:") {
-		return fmt.Errorf(strings.TrimPrefix(response, "ERROR:"))
+		return fmt.Errorf("%s", strings.TrimPrefix(response, "ERROR:"))
 	}
 
 	var state sessionState
@@ -95,7 +94,7 @@ func sessionList() error {
 		if s.ClaudeID == activeProject.ActiveSession {
 			marker = "* "
 		}
-		fmt.Printf("%s%s [%s] %s\n", marker, s.Name, s.Status, s.ClaudeID[:8])
+		fmt.Printf("%s%s %s\n", marker, s.Name, s.ClaudeID[:8])
 	}
 
 	return nil
@@ -108,7 +107,7 @@ func sessionSwitch(sessionID string) error {
 	}
 
 	if strings.HasPrefix(response, "ERROR:") {
-		return fmt.Errorf(strings.TrimPrefix(response, "ERROR:"))
+		return fmt.Errorf("%s", strings.TrimPrefix(response, "ERROR:"))
 	}
 
 	fmt.Println("Switched")
@@ -128,7 +127,7 @@ func sessionNew(name, prompt string) error {
 	}
 
 	if strings.HasPrefix(response, "ERROR:") {
-		return fmt.Errorf(strings.TrimPrefix(response, "ERROR:"))
+		return fmt.Errorf("%s", strings.TrimPrefix(response, "ERROR:"))
 	}
 
 	fmt.Println("Creating session...")
