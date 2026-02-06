@@ -318,7 +318,7 @@ func runDaemon(ctx context.Context, dataDir string) error {
 		otel.Warn(ctx, "failed to set menu button", otel.Attr{K: "error", V: err.Error()})
 	}
 
-	bot.SendMessage(cfg.TelegramUserID, "Pink Agent activated and ready to work")
+	bot.SendMessage(cfg.TelegramUserID, "🦄 Pink Agent activated and ready to work")
 
 	botCtx, botCancel := context.WithCancel(ctx)
 	go bot.Start(botCtx)

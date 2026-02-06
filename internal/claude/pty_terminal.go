@@ -25,12 +25,12 @@ const inputDelay = 250 * time.Millisecond
 type Terminal struct {
 	sessionID     string
 	name          string
+	manager       *Manager
 	pty           gopty.Pty
 	cmd           *gopty.Cmd
 	buffer        *RingBuffer
 	ready         bool
 	queue         []string
-	onOutput      func(string, []byte) // sessionID, data
 	utf8Remainder []byte
 	mu            sync.Mutex
 }
@@ -169,8 +169,8 @@ func (t *Terminal) readLoop(pty gopty.Pty) {
 			go t.flushQueue()
 		}
 
-		if t.onOutput != nil {
-			t.onOutput(t.sessionID, data)
+		if t.manager.onOutput != nil {
+			t.manager.onOutput(t.sessionID, data)
 		}
 	}
 }
@@ -235,8 +235,8 @@ func (m *Manager) StartSession(sessionID, name string) {
 	t := &Terminal{
 		sessionID: sessionID,
 		name:      name,
+		manager:   m,
 		buffer:    NewRingBuffer(10 * 1024 * 1024),
-		onOutput:  m.onOutput,
 	}
 
 	otel.Info(context.Background(), "session starting", otel.Attr{K: "name", V: name})
