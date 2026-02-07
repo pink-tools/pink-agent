@@ -18,7 +18,8 @@ import (
 	"pink-agent/internal/platform"
 )
 
-var readyMarker = []byte("tokens")
+var readyMarker = []byte("bypass permissions")
+var tokensMarker = []byte("tokens")
 var numberRe = regexp.MustCompile(`\d+`)
 
 const (
@@ -117,7 +118,7 @@ func (t *Terminal) Buffer() []byte {
 
 func (t *Terminal) Tokens() string {
 	buf := t.buffer.Bytes()
-	idx := bytes.LastIndex(buf, readyMarker)
+	idx := bytes.LastIndex(buf, tokensMarker)
 	if idx == -1 {
 		return ""
 	}
