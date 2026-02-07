@@ -18,7 +18,7 @@ import (
 	"pink-agent/internal/platform"
 )
 
-var readyMarker = []byte("bypass permissions")
+var readyMarker = []byte("bypass")
 var tokensMarker = []byte("tokens")
 var numberRe = regexp.MustCompile(`\d+`)
 
