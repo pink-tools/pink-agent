@@ -75,13 +75,43 @@ func (b *Bot) Start(ctx context.Context) {
 				continue
 			}
 
-			b.handleUpdate(ctx, update)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						otel.Error(ctx, "handleUpdate panic", otel.Attr{K: "panic", V: fmt.Sprint(r)})
+					}
+				}()
+				b.handleUpdate(ctx, update)
+			}()
 		}
 	}
 }
 
 func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	msg := update.Message
+
+	// Determine message type for logging
+	msgType := "text"
+	switch {
+	case msg.Voice != nil:
+		msgType = "voice"
+	case msg.Photo != nil && len(msg.Photo) > 0:
+		msgType = "photo"
+	case msg.Document != nil:
+		msgType = "document"
+	case msg.Video != nil:
+		msgType = "video"
+	case msg.Audio != nil:
+		msgType = "audio"
+	}
+	preview := msg.Text
+	if preview == "" {
+		preview = msg.Caption
+	}
+	if len(preview) > 50 {
+		preview = preview[:50] + "..."
+	}
+	otel.Info(ctx, "telegram update", otel.Attr{K: "type", V: msgType}, otel.Attr{K: "text", V: preview})
 
 	// Voice is special — transcribe and send
 	if msg.Voice != nil {
@@ -131,6 +161,7 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 
 	// No text yet — files accumulate, wait for text
 	if text == "" {
+		otel.Info(ctx, "no text in update, waiting for text", otel.Attr{K: "pendingFiles", V: len(b.pendingFiles)})
 		return
 	}
 

@@ -57,6 +57,7 @@ func (h *Handlers) HandleMessage(text string, files []string) string {
 		otel.Error(context.Background(), "pty write failed", otel.Attr{K: "error", V: err.Error()})
 		return err.Error()
 	}
+	otel.Info(context.Background(), "pty write ok", otel.Attr{K: "len", V: len(message)})
 	return ""
 }
 

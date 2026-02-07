@@ -46,10 +46,12 @@ func (t *Terminal) Write(text string) error {
 	defer t.mu.Unlock()
 
 	if !t.isRunning() {
+		otel.Warn(context.Background(), "write to dead terminal", otel.Attr{K: "name", V: t.name})
 		return fmt.Errorf("terminal %s not running", t.name)
 	}
 
 	if !t.ready {
+		otel.Info(context.Background(), "queuing message (not ready)", otel.Attr{K: "name", V: t.name}, otel.Attr{K: "queueLen", V: len(t.queue)})
 		t.queue = append(t.queue, text)
 		return nil
 	}
@@ -61,23 +63,28 @@ func (t *Terminal) writeToPTY(text string) error {
 	if t.pty == nil {
 		return errors.New("pty not running")
 	}
-	t.writeAndSubmit(text)
-	return nil
+	return t.writeAndSubmit(text)
 }
 
-func (t *Terminal) writeAndSubmit(text string) {
+func (t *Terminal) writeAndSubmit(text string) error {
 	if t.pty == nil {
 		otel.Error(context.Background(), "writeAndSubmit: pty is nil", otel.Attr{K: "sessionID", V: t.sessionID[:8]})
-		return
+		return errors.New("pty is nil")
 	}
-	// WriteAll handles short writes from PTY buffer (~4096 bytes on macOS)
-	io.Copy(t.pty, strings.NewReader(text))
+	if _, err := io.Copy(t.pty, strings.NewReader(text)); err != nil {
+		otel.Error(context.Background(), "pty write failed", otel.Attr{K: "error", V: err.Error()}, otel.Attr{K: "sessionID", V: t.sessionID[:8]})
+		return err
+	}
 	delay := inputDelay
 	if containsFilePath(text) {
 		delay = fileInputDelay
 	}
 	time.Sleep(delay)
-	t.pty.Write([]byte("\r"))
+	if _, err := t.pty.Write([]byte("\r")); err != nil {
+		otel.Error(context.Background(), "pty enter failed", otel.Attr{K: "error", V: err.Error()}, otel.Attr{K: "sessionID", V: t.sessionID[:8]})
+		return err
+	}
+	return nil
 }
 
 var filePathRe = regexp.MustCompile(`(?m)^/[^\s]+\.\w+$`)
@@ -221,12 +228,14 @@ func (t *Terminal) flushQueue() {
 		return
 	}
 
-	combined := strings.Join(t.queue, "\n")
-	t.queue = nil
-
 	if t.pty == nil {
+		otel.Error(context.Background(), "flushQueue: pty nil, dropping messages", otel.Attr{K: "count", V: len(t.queue)}, otel.Attr{K: "name", V: t.name})
+		t.queue = nil
 		return
 	}
+
+	combined := strings.Join(t.queue, "\n")
+	t.queue = nil
 	t.writeAndSubmit(combined)
 }
 
