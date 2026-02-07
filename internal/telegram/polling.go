@@ -2,10 +2,12 @@ package telegram
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	otel "github.com/pink-tools/pink-otel"
@@ -174,7 +176,9 @@ func (b *Bot) downloadFile(fileID, filename string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	path := filepath.Join(os.TempDir(), filename)
+	ext := filepath.Ext(filename)
+	base := strings.TrimSuffix(filename, ext)
+	path := filepath.Join(os.TempDir(), fmt.Sprintf("%s-%s%s", base, fileID[:8], ext))
 	out, err := os.Create(path)
 	if err != nil {
 		return "", err

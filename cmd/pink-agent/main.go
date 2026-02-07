@@ -32,14 +32,10 @@ const (
 	webAppBaseURL = "https://pink-agent.pinkhaired.com"
 )
 
-// telegramPTYWriter adapts multi-PTY Manager to single-Write interface.
-// Resolves active session from state and delegates to PTY manager.
+// telegramPTYWriter routes messages to the active session's PTY.
 type telegramPTYWriter struct{}
 
 func (w *telegramPTYWriter) Write(text string) error {
-	if stateManager == nil || ptyManager == nil {
-		return projects.ErrNoActiveSession
-	}
 	session := stateManager.GetActiveSession()
 	if session == nil {
 		return projects.ErrNoActiveSession
@@ -122,9 +118,6 @@ Store flags:
 		IPCHandler: func(cmd string) string {
 			switch {
 			case cmd == "getContextTokens":
-				if ptyManager == nil || stateManager == nil {
-					return "0"
-				}
 				session := stateManager.GetActiveSession()
 				if session == nil {
 					return "0"
@@ -132,7 +125,7 @@ Store flags:
 				// Temporarily resize to wide terminal to get full status line
 				oldCols, oldRows := stateManager.GetTerminalSize()
 				ptyManager.Resize(session.ClaudeID, 200, 50)
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(500 * time.Millisecond)
 				tokens := ptyManager.Tokens(session.ClaudeID)
 				ptyManager.Resize(session.ClaudeID, oldCols, oldRows)
 				if tokens == "" {
@@ -155,8 +148,18 @@ Store flags:
 					return "ERROR:not initialized"
 				}
 				sessionID := strings.TrimPrefix(cmd, "switchSession:")
+				oldProject := stateManager.State().GetActiveProject()
 				if err := stateManager.SwitchSession(sessionID); err != nil {
 					return "ERROR:" + err.Error()
+				}
+				newProject := stateManager.State().GetActiveProject()
+				if oldProject != nil && newProject != nil && oldProject.ID != newProject.ID {
+					for _, sess := range oldProject.Sessions {
+						ptyManager.StopSession(sess.ClaudeID)
+					}
+					for _, sess := range newProject.Sessions {
+						ptyManager.StartSession(sess.ClaudeID, sess.Name)
+					}
 				}
 				return "OK"
 
@@ -238,38 +241,39 @@ func runDaemon(ctx context.Context, dataDir string) error {
 		return fmt.Errorf("dependency check: %w", err)
 	}
 
-	// Initialize state
+	// Initialize state — onNotify closure captures wsServer (set later)
 	statePath := filepath.Join(dataDir, "state.json")
 	storage := projects.NewFileStorage(statePath)
-	stateManager, err = projects.NewManager(storage)
+	stateManager, err = projects.NewManager(storage, func(state *projects.State, pending []projects.PendingSession) {
+		if wsServer != nil {
+			wsServer.BroadcastState(state, pending)
+		}
+	})
 	if err != nil {
 		return fmt.Errorf("load state: %w", err)
 	}
+	defer stateManager.Close()
 
 	// Initialize store
 	storePath := filepath.Join(dataDir, "store")
 	fileStore = projects.NewFileStore(storePath)
 
-	// Initialize PTY manager
+	// Initialize PTY manager — output callback filters by active session
 	mcpConfig := filepath.Join(dataDir, "mcp-config.json")
-	ptyManager = claude.NewManager(mcpConfig)
+	ptyManager = claude.NewManager(mcpConfig, func(sessionID string, data []byte) {
+		if wsServer == nil {
+			return
+		}
+		session := stateManager.GetActiveSession()
+		if session != nil && session.ClaudeID == sessionID {
+			wsServer.SendTerminalOutput(sessionID, data)
+		}
+	})
 
 	// Set terminal size from persisted state
 	cols, rows := stateManager.GetTerminalSize()
 	if cols > 0 && rows > 0 {
 		ptyManager.SetTerminalSize(cols, rows)
-	}
-
-	// Eager start: launch all session PTYs
-	for _, sessionID := range stateManager.State().AllSessions() {
-		name := sessionID[:8]
-		for _, p := range stateManager.State().Projects {
-			if s := p.GetSession(sessionID); s != nil {
-				name = s.Name
-				break
-			}
-		}
-		ptyManager.StartSession(sessionID, name)
 	}
 
 	// Initialize tunnel
@@ -286,10 +290,12 @@ func runDaemon(ctx context.Context, dataDir string) error {
 	// Initialize WebSocket server
 	wsServer = websocket.NewServer(stateManager, ptyManager, fileStore, cfg.TelegramBotToken, cfg.TelegramUserID)
 
-	// Register state change callback
-	stateManager.SetOnChange(func(state *projects.State, pending []projects.PendingSession) {
-		wsServer.BroadcastState(state, pending)
-	})
+	// Start PTYs for active project only
+	if project := stateManager.State().GetActiveProject(); project != nil {
+		for _, sess := range project.Sessions {
+			ptyManager.StartSession(sess.ClaudeID, sess.Name)
+		}
+	}
 
 	// Start HTTP server
 	http.HandleFunc("/ws", wsServer.Handler())

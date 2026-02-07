@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -19,7 +21,10 @@ import (
 var readyMarker = []byte("tokens")
 var numberRe = regexp.MustCompile(`\d+`)
 
-const inputDelay = 250 * time.Millisecond
+const (
+	inputDelay     = 250 * time.Millisecond
+	fileInputDelay = 1500 * time.Millisecond
+)
 
 // Terminal is a single PTY process for one Claude Code session
 type Terminal struct {
@@ -32,6 +37,7 @@ type Terminal struct {
 	ready         bool
 	queue         []string
 	utf8Remainder []byte
+	onExit        func(string)
 	mu            sync.Mutex
 }
 
@@ -40,7 +46,7 @@ func (t *Terminal) Write(text string) error {
 	defer t.mu.Unlock()
 
 	if !t.isRunning() {
-		return errors.New("terminal not running")
+		return fmt.Errorf("terminal %s not running", t.name)
 	}
 
 	if !t.ready {
@@ -64,20 +70,37 @@ func (t *Terminal) writeAndSubmit(text string) {
 		otel.Error(context.Background(), "writeAndSubmit: pty is nil", otel.Attr{K: "sessionID", V: t.sessionID[:8]})
 		return
 	}
-	t.pty.Write([]byte(text))
-	time.Sleep(inputDelay)
+	// WriteAll handles short writes from PTY buffer (~4096 bytes on macOS)
+	io.Copy(t.pty, strings.NewReader(text))
+	delay := inputDelay
+	if containsFilePath(text) {
+		delay = fileInputDelay
+	}
+	time.Sleep(delay)
 	t.pty.Write([]byte("\r"))
 }
 
+var filePathRe = regexp.MustCompile(`(?m)^/[^\s]+\.\w+$`)
+
+func containsFilePath(text string) bool {
+	return filePathRe.MatchString(text)
+}
+
 func (t *Terminal) Resize(cols, rows uint16) {
-	if t.pty != nil {
-		t.pty.Resize(int(cols), int(rows))
+	t.mu.Lock()
+	p := t.pty
+	t.mu.Unlock()
+	if p != nil {
+		p.Resize(int(cols), int(rows))
 	}
 }
 
 func (t *Terminal) SendEscape() {
-	if t.pty != nil {
-		t.pty.Write([]byte{0x1b})
+	t.mu.Lock()
+	p := t.pty
+	t.mu.Unlock()
+	if p != nil {
+		p.Write([]byte{0x1b})
 	}
 }
 
@@ -107,6 +130,9 @@ func (t *Terminal) isRunning() bool {
 }
 
 func (t *Terminal) stop() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	if t.cmd == nil {
 		return
 	}
@@ -126,11 +152,19 @@ func (t *Terminal) stop() {
 }
 
 func (t *Terminal) readLoop(pty gopty.Pty) {
+	defer func() {
+		if t.onExit != nil {
+			t.onExit(t.sessionID)
+		}
+	}()
+
 	buf := make([]byte, 4096)
 	for {
 		n, err := pty.Read(buf)
 		if err != nil {
+			t.mu.Lock()
 			cmd := t.cmd
+			t.mu.Unlock()
 			if cmd != nil {
 				cmd.Wait()
 				if cmd.ProcessState != nil && !cmd.ProcessState.Success() {
@@ -165,7 +199,9 @@ func (t *Terminal) readLoop(pty gopty.Pty) {
 		t.buffer.Write(data)
 
 		if !t.ready && bytes.Contains(t.buffer.Bytes(), readyMarker) {
+			t.mu.Lock()
 			t.ready = true
+			t.mu.Unlock()
 			go t.flushQueue()
 		}
 
@@ -176,19 +212,21 @@ func (t *Terminal) readLoop(pty gopty.Pty) {
 }
 
 func (t *Terminal) flushQueue() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	otel.Info(context.Background(), "session ready", otel.Attr{K: "name", V: t.name}, otel.Attr{K: "queueLen", V: len(t.queue)})
 
 	if len(t.queue) == 0 {
 		return
 	}
 
-	time.Sleep(500 * time.Millisecond)
-
-	t.mu.Lock()
 	combined := strings.Join(t.queue, "\n")
 	t.queue = nil
-	t.mu.Unlock()
 
+	if t.pty == nil {
+		return
+	}
 	t.writeAndSubmit(combined)
 }
 
@@ -202,17 +240,12 @@ type Manager struct {
 	mu        sync.Mutex
 }
 
-func NewManager(mcpConfig string) *Manager {
+func NewManager(mcpConfig string, onOutput func(sessionID string, data []byte)) *Manager {
 	return &Manager{
 		terminals: make(map[string]*Terminal),
 		mcpConfig: mcpConfig,
+		onOutput:  onOutput,
 	}
-}
-
-func (m *Manager) SetOutputHandler(fn func(sessionID string, data []byte)) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.onOutput = fn
 }
 
 func (m *Manager) SetTerminalSize(cols, rows uint16) {
@@ -237,6 +270,16 @@ func (m *Manager) StartSession(sessionID, name string) {
 		name:      name,
 		manager:   m,
 		buffer:    NewRingBuffer(10 * 1024 * 1024),
+	}
+
+	// Self-cleanup: when process exits, remove from map (only if still the same terminal)
+	t.onExit = func(id string) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.terminals[id] == t {
+			delete(m.terminals, id)
+			otel.Info(context.Background(), "terminal self-cleanup", otel.Attr{K: "name", V: name})
+		}
 	}
 
 	otel.Info(context.Background(), "session starting", otel.Attr{K: "name", V: name})
@@ -302,7 +345,7 @@ func (m *Manager) Write(sessionID, text string) error {
 	m.mu.Unlock()
 
 	if !ok {
-		return errors.New("no terminal for session " + sessionID[:8])
+		return fmt.Errorf("no terminal for session %s", sessionID[:8])
 	}
 	return t.Write(text)
 }
@@ -369,8 +412,9 @@ func (m *Manager) IsRunning(sessionID string) bool {
 	return false
 }
 
-// RingBuffer is a simple circular buffer
+// RingBuffer is a simple circular buffer with internal synchronization
 type RingBuffer struct {
+	mu   sync.Mutex
 	data []byte
 	size int
 	pos  int
@@ -385,6 +429,8 @@ func NewRingBuffer(size int) *RingBuffer {
 }
 
 func (r *RingBuffer) Write(p []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for _, b := range p {
 		r.data[r.pos] = b
 		r.pos = (r.pos + 1) % r.size
@@ -395,8 +441,12 @@ func (r *RingBuffer) Write(p []byte) {
 }
 
 func (r *RingBuffer) Bytes() []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if !r.full {
-		return r.data[:r.pos]
+		result := make([]byte, r.pos)
+		copy(result, r.data[:r.pos])
+		return result
 	}
 	result := make([]byte, r.size)
 	copy(result, r.data[r.pos:])
@@ -405,6 +455,8 @@ func (r *RingBuffer) Bytes() []byte {
 }
 
 func (r *RingBuffer) Clear() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.pos = 0
 	r.full = false
 }

@@ -3,7 +3,6 @@ package websocket
 import (
 	"encoding/json"
 
-	"github.com/gorilla/websocket"
 	"pink-agent/internal/projects"
 )
 
@@ -30,19 +29,24 @@ func (s *Server) sendEvent(eventType string, data any) {
 	s.send(Event{Type: eventType, Data: data})
 }
 
-// send marshals and sends message to WebSocket
+// send marshals and sends message via channel (non-blocking)
 func (s *Server) send(msg any) {
-	s.connMu.Lock()
-	defer s.connMu.Unlock()
-
-	if s.conn == nil {
-		return
-	}
-
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return
 	}
 
-	s.conn.WriteMessage(websocket.TextMessage, data)
+	s.connMu.Lock()
+	ch := s.sendCh
+	s.connMu.Unlock()
+
+	if ch == nil {
+		return
+	}
+
+	select {
+	case ch <- data:
+	default:
+		// Channel full — drop message to avoid blocking
+	}
 }

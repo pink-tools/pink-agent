@@ -54,6 +54,7 @@ func (h *Handlers) HandleMessage(text string, files []string) string {
 	otel.Info(context.Background(), "message received", attrs...)
 
 	if err := h.pty.Write(message); err != nil {
+		otel.Error(context.Background(), "pty write failed", otel.Attr{K: "error", V: err.Error()})
 		return err.Error()
 	}
 	return ""
@@ -80,6 +81,7 @@ func (h *Handlers) HandleVoice(audioPath string) (transcribed string, errMsg str
 
 	voicePrefix := "[VOICE INPUT: May contain speech recognition errors. Ask for clarification if unclear.] "
 	if err := h.pty.Write(voicePrefix + text); err != nil {
+		otel.Error(context.Background(), "pty write failed", otel.Attr{K: "error", V: err.Error()})
 		return "", err.Error()
 	}
 	return text, ""

@@ -154,20 +154,34 @@ func (s *Server) handleProjectSwitch(ctx context.Context, req Request) *Error {
 		return &Error{Code: ErrCodeInvalidParams, Message: err.Error()}
 	}
 
-	fromProject := ""
-	if p := s.state.State().GetActiveProject(); p != nil {
-		fromProject = p.Name
-	}
+	oldProject := s.state.State().GetActiveProject()
 
 	if err := s.state.SwitchProject(params.ID); err != nil {
 		return mapError(err)
 	}
 
-	toProject := ""
-	if p := s.state.State().GetActiveProject(); p != nil {
-		toProject = p.Name
+	newProject := s.state.State().GetActiveProject()
+
+	// Stop old project PTYs, start new project PTYs
+	if oldProject != nil {
+		for _, sess := range oldProject.Sessions {
+			s.pty.StopSession(sess.ClaudeID)
+		}
 	}
-	otel.Info(ctx, "project switch", otel.Attr{K: "from", V: fromProject}, otel.Attr{K: "to", V: toProject})
+	if newProject != nil {
+		for _, sess := range newProject.Sessions {
+			s.pty.StartSession(sess.ClaudeID, sess.Name)
+		}
+	}
+
+	fromName, toName := "", ""
+	if oldProject != nil {
+		fromName = oldProject.Name
+	}
+	if newProject != nil {
+		toName = newProject.Name
+	}
+	otel.Info(ctx, "project switch", otel.Attr{K: "from", V: fromName}, otel.Attr{K: "to", V: toName})
 
 	// Send buffer of new active session
 	if sess := s.state.State().GetActiveSession(); sess != nil {
@@ -256,16 +270,28 @@ func (s *Server) handleSessionRename(ctx context.Context, req Request) *Error {
 	return nil
 }
 
-// handleSessionSwitch just updates the pointer and sends buffer.
-// No PTY stop/start — all run concurrently.
 func (s *Server) handleSessionSwitch(ctx context.Context, req Request) *Error {
 	var params SessionSwitchParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return &Error{Code: ErrCodeInvalidParams, Message: err.Error()}
 	}
 
+	oldProject := s.state.State().GetActiveProject()
+
 	if err := s.state.SwitchSession(params.ClaudeID); err != nil {
 		return mapError(err)
+	}
+
+	newProject := s.state.State().GetActiveProject()
+
+	// If project changed, stop old PTYs and start new ones
+	if oldProject != nil && newProject != nil && oldProject.ID != newProject.ID {
+		for _, sess := range oldProject.Sessions {
+			s.pty.StopSession(sess.ClaudeID)
+		}
+		for _, sess := range newProject.Sessions {
+			s.pty.StartSession(sess.ClaudeID, sess.Name)
+		}
 	}
 
 	otel.Info(ctx, "session switch", otel.Attr{K: "sessionId", V: params.ClaudeID[:8]})

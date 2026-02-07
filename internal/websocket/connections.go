@@ -58,7 +58,6 @@ type PTYManager interface {
 	StartSession(sessionID, name string)
 	StopSession(sessionID string)
 	StopAll()
-	SetOutputHandler(fn func(sessionID string, data []byte))
 	SetTerminalSize(cols, rows uint16)
 	IsRunning(sessionID string) bool
 }
@@ -72,6 +71,7 @@ type Server struct {
 	userID   int64
 
 	conn   *websocket.Conn
+	sendCh chan []byte
 	connMu sync.Mutex
 }
 
@@ -113,11 +113,14 @@ func (s *Server) handleConnection(ctx context.Context, w http.ResponseWriter, r 
 		return
 	}
 
+	sendCh := make(chan []byte, 64)
+
 	s.connMu.Lock()
 	if s.conn != nil {
 		s.conn.Close()
 	}
 	s.conn = conn
+	s.sendCh = sendCh
 	s.connMu.Unlock()
 
 	otel.Info(ctx, "mini app connected")
@@ -128,13 +131,16 @@ func (s *Server) handleConnection(ctx context.Context, w http.ResponseWriter, r 
 		return nil
 	})
 	go s.pingLoop(conn)
+	go s.writeLoop(conn, sendCh)
 
-	s.pty.SetOutputHandler(func(sessionID string, data []byte) {
-		s.sendEvent("terminal.output", map[string]string{
-			"sessionId": sessionID,
-			"data":      string(data),
+	// Push current state + active session buffer on connect
+	s.BroadcastState(s.state.State(), s.state.PendingSessions())
+	if sess := s.state.State().GetActiveSession(); sess != nil {
+		s.sendEvent("terminal.buffer", map[string]string{
+			"sessionId": sess.ClaudeID,
+			"data":      string(s.pty.Buffer(sess.ClaudeID)),
 		})
-	})
+	}
 
 	s.readLoop(ctx, conn)
 
@@ -158,6 +164,21 @@ func (s *Server) pingLoop(conn *websocket.Conn) {
 	}
 }
 
+// writeLoop drains sendCh and writes to conn. Exits when conn errors or is replaced.
+func (s *Server) writeLoop(conn *websocket.Conn, ch chan []byte) {
+	for data := range ch {
+		s.connMu.Lock()
+		current := s.conn
+		s.connMu.Unlock()
+		if current != conn {
+			return
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			return
+		}
+	}
+}
+
 func (s *Server) readLoop(ctx context.Context, conn *websocket.Conn) {
 	for {
 		_, data, err := conn.ReadMessage()
@@ -173,6 +194,14 @@ func (s *Server) readLoop(ctx context.Context, conn *websocket.Conn) {
 
 		s.handleRequest(ctx, req)
 	}
+}
+
+// SendTerminalOutput sends terminal output data to the connected UI
+func (s *Server) SendTerminalOutput(sessionID string, data []byte) {
+	s.sendEvent("terminal.output", map[string]string{
+		"sessionId": sessionID,
+		"data":      string(data),
+	})
 }
 
 // Telegram Mini App auth validation

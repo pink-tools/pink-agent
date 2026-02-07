@@ -14,10 +14,11 @@ func HandleStore(args []string) error {
 	statePath := filepath.Join(dataDir, "state.json")
 
 	storage := projects.NewFileStorage(statePath)
-	stateManager, err := projects.NewManager(storage)
+	stateManager, err := projects.NewManager(storage, nil)
 	if err != nil {
 		return fmt.Errorf("load state: %w", err)
 	}
+	defer stateManager.Close()
 
 	fileStore := projects.NewFileStore(storePath)
 
