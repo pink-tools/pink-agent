@@ -38,10 +38,8 @@ type telegramPTYWriter struct{}
 func (w *telegramPTYWriter) Write(text string) error {
 	session := stateManager.GetActiveSession()
 	if session == nil {
-		otel.Warn(context.Background(), "no active session for telegram message")
 		return projects.ErrNoActiveSession
 	}
-	otel.Info(context.Background(), "routing to pty", otel.Attr{K: "session", V: session.ClaudeID[:8]})
 	return ptyManager.Write(session.ClaudeID, text)
 }
 
