@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -62,22 +61,33 @@ func (t *Terminal) writeToPTY(text string) error {
 	if t.pty == nil {
 		return errors.New("pty not running")
 	}
-	t.writeAndSubmit(text)
-	return nil
+	return t.writeAndSubmit(text)
 }
 
-func (t *Terminal) writeAndSubmit(text string) {
+func (t *Terminal) writeAndSubmit(text string) error {
 	if t.pty == nil {
-		otel.Error(context.Background(), "writeAndSubmit: pty is nil", otel.Attr{K: "sessionID", V: t.sessionID[:8]})
-		return
+		return errors.New("pty is nil")
 	}
-	io.Copy(t.pty, strings.NewReader(text))
+
+	data := []byte(text)
+	n, err := t.pty.Write(data)
+	if err != nil {
+		return fmt.Errorf("pty write failed: %w (wrote %d/%d bytes)", err, n, len(data))
+	}
+	if n != len(data) {
+		return fmt.Errorf("pty short write: %d/%d bytes", n, len(data))
+	}
+
 	delay := inputDelay
 	if containsFilePath(text) {
 		delay = fileInputDelay
 	}
 	time.Sleep(delay)
-	t.pty.Write([]byte("\r"))
+
+	if _, err := t.pty.Write([]byte("\r")); err != nil {
+		return fmt.Errorf("pty submit failed: %w", err)
+	}
+	return nil
 }
 
 var filePathRe = regexp.MustCompile(`(?m)^/[^\s]+\.\w+$`)
@@ -227,7 +237,9 @@ func (t *Terminal) flushQueue() {
 	if t.pty == nil {
 		return
 	}
-	t.writeAndSubmit(combined)
+	if err := t.writeAndSubmit(combined); err != nil {
+		otel.Error(context.Background(), "flush queue failed", otel.Attr{K: "error", V: err.Error()})
+	}
 }
 
 // Manager manages all Terminal instances
