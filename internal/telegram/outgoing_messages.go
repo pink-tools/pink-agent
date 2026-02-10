@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
-	"net/http"
 	"os"
 	"path/filepath"
 )
@@ -13,7 +12,7 @@ import (
 // SendMessage sends a text message via Telegram API
 func SendMessage(token string, chatID int64, text string) error {
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
-	resp, err := http.PostForm(url, map[string][]string{
+	resp, err := httpClient.PostForm(url, map[string][]string{
 		"chat_id": {fmt.Sprintf("%d", chatID)},
 		"text":    {text},
 	})
@@ -51,7 +50,7 @@ func SendFile(token string, chatID int64, filePath string) error {
 	w.Close()
 
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", token)
-	resp, err := http.Post(url, w.FormDataContentType(), &buf)
+	resp, err := httpClient.Post(url, w.FormDataContentType(), &buf)
 	if err != nil {
 		return err
 	}

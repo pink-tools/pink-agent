@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,8 +25,9 @@ var upgrader = websocket.Upgrader{
 }
 
 const (
-	pingInterval = 30 * time.Second
-	pongWait     = 60 * time.Second
+	pingInterval      = 30 * time.Second
+	pongWait          = 60 * time.Second
+	heartbeatInterval = 25 * time.Second
 )
 
 // StateManager interface for state operations
@@ -55,7 +57,7 @@ type PTYManager interface {
 	Resize(sessionID string, cols, rows uint16)
 	ResizeAll(cols, rows uint16)
 	SendEscape(sessionID string)
-	StartSession(sessionID, name string)
+	StartSession(sessionID, name string) error
 	StopSession(sessionID string)
 	StopAll()
 	SetTerminalSize(cols, rows uint16)
@@ -69,6 +71,7 @@ type Server struct {
 	store    *projects.FileStore
 	botToken string
 	userID   int64
+	dev      bool
 
 	conn   *websocket.Conn
 	sendCh chan []byte
@@ -86,6 +89,11 @@ func NewServer(state StateManager, pty PTYManager, store *projects.FileStore, bo
 	}
 }
 
+// SetDev enables the development handler (no auth). Must be called before registering routes.
+func (s *Server) SetDev(enabled bool) {
+	s.dev = enabled
+}
+
 // Handler returns HTTP handler with Telegram auth
 func (s *Server) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -100,9 +108,13 @@ func (s *Server) Handler() http.HandlerFunc {
 	}
 }
 
-// DevHandler returns HTTP handler without auth (for development)
+// DevHandler returns HTTP handler without auth. Only works when dev mode is explicitly enabled via SetDev(true).
 func (s *Server) DevHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.dev {
+			http.Error(w, "dev mode not enabled", http.StatusForbidden)
+			return
+		}
 		s.handleConnection(r.Context(), w, r)
 	}
 }
@@ -119,6 +131,9 @@ func (s *Server) handleConnection(ctx context.Context, w http.ResponseWriter, r 
 	if s.conn != nil {
 		s.conn.Close()
 	}
+	if s.sendCh != nil {
+		close(s.sendCh)
+	}
 	s.conn = conn
 	s.sendCh = sendCh
 	s.connMu.Unlock()
@@ -131,6 +146,7 @@ func (s *Server) handleConnection(ctx context.Context, w http.ResponseWriter, r 
 		return nil
 	})
 	go s.pingLoop(conn)
+	go s.heartbeatLoop(conn, sendCh)
 	go s.writeLoop(conn, sendCh)
 
 	// Push current state + active session buffer on connect
@@ -164,6 +180,26 @@ func (s *Server) pingLoop(conn *websocket.Conn) {
 	}
 }
 
+// heartbeatLoop sends application-level heartbeat messages through sendCh.
+// Send is under connMu to prevent sending on a closed channel after conn replacement.
+func (s *Server) heartbeatLoop(conn *websocket.Conn, ch chan []byte) {
+	msg, _ := json.Marshal(Event{Type: "heartbeat"})
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.connMu.Lock()
+		if s.conn != conn {
+			s.connMu.Unlock()
+			return
+		}
+		select {
+		case ch <- msg:
+		default:
+		}
+		s.connMu.Unlock()
+	}
+}
+
 // writeLoop drains sendCh and writes to conn. Exits when conn errors or is replaced.
 func (s *Server) writeLoop(conn *websocket.Conn, ch chan []byte) {
 	for data := range ch {
@@ -184,6 +220,15 @@ func (s *Server) readLoop(ctx context.Context, conn *websocket.Conn) {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			return
+		}
+
+		// Check for application-level heartbeat from client
+		var peek struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(data, &peek) == nil && peek.Type == "heartbeat" {
+			conn.SetReadDeadline(time.Now().Add(pongWait))
+			continue
 		}
 
 		var req Request
@@ -257,6 +302,18 @@ func validateTelegramAuth(initData string, botToken string, allowedUserID int64)
 
 	if !hmac.Equal([]byte(hash), []byte(expectedHash)) {
 		return errors.New("invalid hash")
+	}
+
+	authDateStr := params.Get("auth_date")
+	if authDateStr == "" {
+		return errors.New("missing auth_date")
+	}
+	authDate, err := strconv.ParseInt(authDateStr, 10, 64)
+	if err != nil {
+		return errors.New("invalid auth_date")
+	}
+	if time.Now().Unix()-authDate > 3600 {
+		return errors.New("auth_date too old")
 	}
 
 	return nil

@@ -1,11 +1,13 @@
 package claude
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	core "github.com/pink-tools/pink-core"
 )
@@ -39,10 +41,16 @@ func CreateSession(projectName, projectContext string) (string, error) {
 }
 
 func runClaude(args ...string) (string, error) {
-	cmd := exec.Command("claude", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = core.BaseDir()
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", errors.New("claude command timed out after 60s")
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return "", errors.New(string(exitErr.Stderr))
 		}

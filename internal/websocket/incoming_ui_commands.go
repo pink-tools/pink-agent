@@ -170,7 +170,9 @@ func (s *Server) handleProjectSwitch(ctx context.Context, req Request) *Error {
 	}
 	if newProject != nil {
 		for _, sess := range newProject.Sessions {
-			s.pty.StartSession(sess.ClaudeID, sess.Name)
+			if err := s.pty.StartSession(sess.ClaudeID, sess.Name); err != nil {
+				otel.Error(ctx, "start session failed", otel.Attr{K: "session", V: sess.Name}, otel.Attr{K: "error", V: err.Error()})
+			}
 		}
 	}
 
@@ -228,7 +230,9 @@ func (s *Server) handleSessionCreate(ctx context.Context, req Request) *Error {
 		}
 
 		otel.Info(ctx, "session created", otel.Attr{K: "name", V: name}, otel.Attr{K: "id", V: claudeID})
-		s.pty.StartSession(claudeID, name)
+		if err := s.pty.StartSession(claudeID, name); err != nil {
+			otel.Error(ctx, "start session failed", otel.Attr{K: "name", V: name}, otel.Attr{K: "error", V: err.Error()})
+		}
 	}(project.ID, sessionName, pendingID)
 
 	return nil
@@ -290,11 +294,13 @@ func (s *Server) handleSessionSwitch(ctx context.Context, req Request) *Error {
 			s.pty.StopSession(sess.ClaudeID)
 		}
 		for _, sess := range newProject.Sessions {
-			s.pty.StartSession(sess.ClaudeID, sess.Name)
+			if err := s.pty.StartSession(sess.ClaudeID, sess.Name); err != nil {
+				otel.Error(ctx, "start session failed", otel.Attr{K: "session", V: sess.Name}, otel.Attr{K: "error", V: err.Error()})
+			}
 		}
 	}
 
-	otel.Info(ctx, "session switch", otel.Attr{K: "sessionId", V: params.ClaudeID[:8]})
+	otel.Info(ctx, "session switch", otel.Attr{K: "sessionId", V: truncateID(params.ClaudeID)})
 
 	s.sendEvent("terminal.buffer", map[string]string{
 		"sessionId": params.ClaudeID,
@@ -460,7 +466,11 @@ func (s *Server) handleStoreSend(ctx context.Context, req Request) *Error {
 		return &Error{Code: ErrCodeProjectNotFound, Message: "project not found"}
 	}
 
-	fullPath := filepath.Join(s.store.Path(params.ProjectID), params.Path)
+	storeDir := s.store.Path(params.ProjectID)
+	fullPath := filepath.Clean(filepath.Join(storeDir, params.Path))
+	if !strings.HasPrefix(fullPath, storeDir+string(filepath.Separator)) && fullPath != storeDir {
+		return &Error{Code: ErrCodeStoreError, Message: "path escapes store directory"}
+	}
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -486,6 +496,13 @@ func isTextFile(path string) bool {
 		".kt": true, ".scala": true, ".pl": true, ".php": true, ".lua": true,
 	}
 	return textExts[ext]
+}
+
+func truncateID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }
 
 func (s *Server) getProjectInfo() (string, string) {

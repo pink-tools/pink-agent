@@ -1,10 +1,14 @@
 package projects
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+var ErrPathTraversal = errors.New("path escapes store directory")
 
 // FileInfo represents a file in the project store
 type FileInfo struct {
@@ -56,13 +60,28 @@ func (s *FileStore) List(projectID string) ([]FileInfo, error) {
 	return files, err
 }
 
+func (s *FileStore) safePath(projectID, path string) (string, error) {
+	dir := s.Path(projectID)
+	full := filepath.Clean(filepath.Join(dir, path))
+	if !strings.HasPrefix(full, dir+string(filepath.Separator)) && full != dir {
+		return "", ErrPathTraversal
+	}
+	return full, nil
+}
+
 func (s *FileStore) Get(projectID, path string) ([]byte, error) {
-	fullPath := filepath.Join(s.Path(projectID), path)
+	fullPath, err := s.safePath(projectID, path)
+	if err != nil {
+		return nil, err
+	}
 	return os.ReadFile(fullPath)
 }
 
 func (s *FileStore) Add(projectID, path string, content []byte) error {
-	fullPath := filepath.Join(s.Path(projectID), path)
+	fullPath, err := s.safePath(projectID, path)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		return err
 	}
@@ -70,7 +89,10 @@ func (s *FileStore) Add(projectID, path string, content []byte) error {
 }
 
 func (s *FileStore) Delete(projectID, path string) error {
-	fullPath := filepath.Join(s.Path(projectID), path)
+	fullPath, err := s.safePath(projectID, path)
+	if err != nil {
+		return err
+	}
 	return os.Remove(fullPath)
 }
 

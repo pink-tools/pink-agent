@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pink-tools/pink-core"
@@ -22,10 +24,14 @@ import (
 )
 
 var version = "dev"
-var ptyManager *claude.Manager
-var stateManager *projects.Manager
-var fileStore *projects.FileStore
-var wsServer *websocket.Server
+
+var (
+	ptyManagerPtr   atomic.Pointer[claude.Manager]
+	stateManagerPtr atomic.Pointer[projects.Manager]
+	fileStorePtr    atomic.Pointer[projects.FileStore]
+	wsServerPtr     atomic.Pointer[websocket.Server]
+	tokensMu        sync.Mutex
+)
 
 const (
 	serviceName   = "pink-agent"
@@ -36,11 +42,16 @@ const (
 type telegramPTYWriter struct{}
 
 func (w *telegramPTYWriter) Write(text string) error {
-	session := stateManager.GetActiveSession()
+	sm := stateManagerPtr.Load()
+	pm := ptyManagerPtr.Load()
+	if sm == nil || pm == nil {
+		return projects.ErrNoActiveSession
+	}
+	session := sm.GetActiveSession()
 	if session == nil {
 		return projects.ErrNoActiveSession
 	}
-	return ptyManager.Write(session.ClaudeID, text)
+	return pm.Write(session.ClaudeID, text)
 }
 
 func main() {
@@ -54,6 +65,7 @@ func main() {
 
 Usage:
   pink-agent                          Start daemon
+  pink-agent --dev                    Start daemon in dev mode (no auth)
   pink-agent stop                     Stop daemon
   pink-agent status                   Check if running
   pink-agent send <text>              Send text message
@@ -118,59 +130,73 @@ Store flags:
 		IPCHandler: func(cmd string) string {
 			switch {
 			case cmd == "getContextTokens":
-				session := stateManager.GetActiveSession()
+				sm := stateManagerPtr.Load()
+				pm := ptyManagerPtr.Load()
+				if sm == nil || pm == nil {
+					return "0"
+				}
+				session := sm.GetActiveSession()
 				if session == nil {
 					return "0"
 				}
-				// Temporarily resize to wide terminal to get full status line
-				oldCols, oldRows := stateManager.GetTerminalSize()
-				ptyManager.Resize(session.ClaudeID, 200, 50)
+				tokensMu.Lock()
+				defer tokensMu.Unlock()
+				oldCols, oldRows := sm.GetTerminalSize()
+				pm.Resize(session.ClaudeID, 200, 50)
 				time.Sleep(500 * time.Millisecond)
-				tokens := ptyManager.Tokens(session.ClaudeID)
-				ptyManager.Resize(session.ClaudeID, oldCols, oldRows)
+				tokens := pm.Tokens(session.ClaudeID)
+				pm.Resize(session.ClaudeID, oldCols, oldRows)
 				if tokens == "" {
 					return "0"
 				}
 				return tokens
 
 			case cmd == "getState":
-				if stateManager == nil {
+				sm := stateManagerPtr.Load()
+				if sm == nil {
 					return "ERROR:not initialized"
 				}
-				data, err := json.Marshal(stateManager.State())
+				data, err := json.Marshal(sm.State())
 				if err != nil {
 					return "ERROR:" + err.Error()
 				}
 				return string(data)
 
 			case strings.HasPrefix(cmd, "switchSession:"):
-				if stateManager == nil {
+				sm := stateManagerPtr.Load()
+				pm := ptyManagerPtr.Load()
+				if sm == nil || pm == nil {
 					return "ERROR:not initialized"
 				}
 				sessionID := strings.TrimPrefix(cmd, "switchSession:")
-				oldProject := stateManager.State().GetActiveProject()
-				if err := stateManager.SwitchSession(sessionID); err != nil {
+				oldProject := sm.State().GetActiveProject()
+				if err := sm.SwitchSession(sessionID); err != nil {
 					return "ERROR:" + err.Error()
 				}
-				newProject := stateManager.State().GetActiveProject()
+				newProject := sm.State().GetActiveProject()
 				if oldProject != nil && newProject != nil && oldProject.ID != newProject.ID {
 					for _, sess := range oldProject.Sessions {
-						ptyManager.StopSession(sess.ClaudeID)
+						pm.StopSession(sess.ClaudeID)
 					}
 					for _, sess := range newProject.Sessions {
-						ptyManager.StartSession(sess.ClaudeID, sess.Name)
+						if err := pm.StartSession(sess.ClaudeID, sess.Name); err != nil {
+							return "ERROR:" + err.Error()
+						}
 					}
 				}
 				return "OK"
 
 			case cmd == "refreshStore":
-				if wsServer != nil {
-					wsServer.RefreshStore()
+				ws := wsServerPtr.Load()
+				if ws != nil {
+					ws.RefreshStore()
 				}
 				return "OK"
 
 			case strings.HasPrefix(cmd, "createSession:"):
-				if stateManager == nil {
+				sm := stateManagerPtr.Load()
+				fs := fileStorePtr.Load()
+				if sm == nil {
 					return "ERROR:not initialized"
 				}
 				jsonData := strings.TrimPrefix(cmd, "createSession:")
@@ -181,7 +207,7 @@ Store flags:
 				if err := json.Unmarshal([]byte(jsonData), &params); err != nil {
 					return "ERROR:invalid params: " + err.Error()
 				}
-				project := stateManager.State().GetActiveProject()
+				project := sm.State().GetActiveProject()
 				if project == nil {
 					return "ERROR:no active project"
 				}
@@ -190,12 +216,12 @@ Store flags:
 					name = fmt.Sprintf("Session %d", len(project.Sessions)+1)
 				}
 
-				pendingID := stateManager.AddPendingSession(project.ID, name)
+				pendingID := sm.AddPendingSession(project.ID, name)
 
 				// Build project context
 				projectCtx := ""
-				if fileStore != nil {
-					if content, err := fileStore.Get(project.ID, "PROJECT.md"); err == nil {
+				if fs != nil {
+					if content, err := fs.Get(project.ID, "PROJECT.md"); err == nil {
 						projectCtx = string(content)
 					}
 				}
@@ -207,16 +233,24 @@ Store flags:
 					}
 				}
 
-				go func(projectID, projectName, sessionName, pending, ctx string) {
-					realID, err := claude.CreateSession(projectName, ctx)
+				go func(projectID, projectName, sessionName, pending, pCtx string) {
+					realID, err := claude.CreateSession(projectName, pCtx)
 					if err != nil {
-						stateManager.FailPendingSession(pending, err.Error())
+						sm := stateManagerPtr.Load()
+						if sm != nil {
+							sm.FailPendingSession(pending, err.Error())
+						}
 						return
 					}
-					if err := stateManager.FinishPendingSession(pending, realID); err != nil {
+					sm := stateManagerPtr.Load()
+					pm := ptyManagerPtr.Load()
+					if sm == nil || pm == nil {
 						return
 					}
-					ptyManager.StartSession(realID, sessionName)
+					if err := sm.FinishPendingSession(pending, realID); err != nil {
+						return
+					}
+					_ = pm.StartSession(realID, sessionName)
 				}(project.ID, project.Name, name, pendingID, projectCtx)
 				return "OK"
 
@@ -227,6 +261,15 @@ Store flags:
 	}, func(ctx context.Context) error {
 		return runDaemon(ctx, dataDir)
 	})
+}
+
+func hasFlag(name string) bool {
+	for _, arg := range os.Args[1:] {
+		if arg == name {
+			return true
+		}
+	}
+	return false
 }
 
 func runDaemon(ctx context.Context, dataDir string) error {
@@ -241,34 +284,47 @@ func runDaemon(ctx context.Context, dataDir string) error {
 		return fmt.Errorf("dependency check: %w", err)
 	}
 
-	// Initialize state — onNotify closure captures wsServer (set later)
+	// Initialize state — onNotify closure uses atomic load for wsServer
 	statePath := filepath.Join(dataDir, "state.json")
 	storage := projects.NewFileStorage(statePath)
-	stateManager, err = projects.NewManager(storage, func(state *projects.State, pending []projects.PendingSession) {
-		if wsServer != nil {
-			wsServer.BroadcastState(state, pending)
+	stateManager, err := projects.NewManager(storage, func(state *projects.State, pending []projects.PendingSession) {
+		ws := wsServerPtr.Load()
+		if ws != nil {
+			ws.BroadcastState(state, pending)
 		}
 	})
 	if err != nil {
 		return fmt.Errorf("load state: %w", err)
 	}
-	defer stateManager.Close()
+	stateManagerPtr.Store(stateManager)
+	defer func() {
+		stateManager.Close()
+		stateManagerPtr.Store(nil)
+	}()
 
 	// Initialize store
 	storePath := filepath.Join(dataDir, "store")
-	fileStore = projects.NewFileStore(storePath)
+	fileStore := projects.NewFileStore(storePath)
+	fileStorePtr.Store(fileStore)
+	defer fileStorePtr.Store(nil)
 
 	// Initialize PTY manager — output callback filters by active session
 	mcpConfig := filepath.Join(dataDir, "mcp-config.json")
-	ptyManager = claude.NewManager(mcpConfig, func(sessionID string, data []byte) {
-		if wsServer == nil {
+	ptyManager := claude.NewManager(mcpConfig, func(sessionID string, data []byte) {
+		ws := wsServerPtr.Load()
+		if ws == nil {
 			return
 		}
 		session := stateManager.GetActiveSession()
 		if session != nil && session.ClaudeID == sessionID {
-			wsServer.SendTerminalOutput(sessionID, data)
+			ws.SendTerminalOutput(sessionID, data)
 		}
 	})
+	ptyManagerPtr.Store(ptyManager)
+	defer func() {
+		ptyManager.StopAll()
+		ptyManagerPtr.Store(nil)
+	}()
 
 	// Set terminal size from persisted state
 	cols, rows := stateManager.GetTerminalSize()
@@ -284,32 +340,49 @@ func runDaemon(ctx context.Context, dataDir string) error {
 	defer tun.Stop()
 
 	// Wait for tunnel to be ready
-	tun.WaitReady()
+	if err := tun.WaitReady(); err != nil {
+		return fmt.Errorf("tunnel ready: %w", err)
+	}
 	otel.Info(ctx, "tunnel ready", otel.Attr{K: "url", V: tun.URL()})
 
 	// Initialize WebSocket server
-	wsServer = websocket.NewServer(stateManager, ptyManager, fileStore, cfg.TelegramBotToken, cfg.TelegramUserID)
+	wsServer := websocket.NewServer(stateManager, ptyManager, fileStore, cfg.TelegramBotToken, cfg.TelegramUserID)
+	wsServerPtr.Store(wsServer)
+	defer wsServerPtr.Store(nil)
 
 	// Start PTYs for active project only
 	if project := stateManager.State().GetActiveProject(); project != nil {
 		for _, sess := range project.Sessions {
-			ptyManager.StartSession(sess.ClaudeID, sess.Name)
+			if err := ptyManager.StartSession(sess.ClaudeID, sess.Name); err != nil {
+				otel.Error(ctx, "failed to start session", otel.Attr{K: "name", V: sess.Name}, otel.Attr{K: "error", V: err.Error()})
+			}
 		}
 	}
 
 	// Start HTTP server
-	http.HandleFunc("/ws", wsServer.Handler())
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", wsServer.Handler())
 
-	if os.Getenv("ENVIRONMENT") == "development" {
-		http.HandleFunc("/dev/ws", wsServer.DevHandler())
+	devMode := hasFlag("--dev")
+	if devMode {
+		wsServer.SetDev(true)
+		mux.HandleFunc("/dev/ws", wsServer.DevHandler())
 	}
 
-	server := &http.Server{Addr: fmt.Sprintf(":%d", cfg.Port)}
+	server := &http.Server{Addr: fmt.Sprintf(":%d", cfg.Port), Handler: mux}
+	httpErrCh := make(chan error, 1)
 	go func() {
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
-			otel.Error(ctx, "http server error", otel.Attr{K: "error", V: err.Error()})
+			httpErrCh <- fmt.Errorf("http server: %w", err)
 		}
 	}()
+
+	// Check for immediate bind failure
+	select {
+	case err := <-httpErrCh:
+		return err
+	case <-time.After(100 * time.Millisecond):
+	}
 
 	// Initialize Telegram bot with adapter
 	handlers := telegram.NewHandlers(&telegramPTYWriter{})
@@ -331,11 +404,17 @@ func runDaemon(ctx context.Context, dataDir string) error {
 
 	otel.Info(ctx, "ready", otel.Attr{K: "url", V: webAppURL})
 
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case err := <-httpErrCh:
+		botCancel()
+		return err
+	}
 
 	botCancel()
-	server.Shutdown(context.Background())
-	ptyManager.StopAll()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	server.Shutdown(shutdownCtx)
 
 	return nil
 }

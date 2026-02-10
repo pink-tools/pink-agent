@@ -10,9 +10,13 @@ import (
 	"strings"
 	"time"
 
-	otel "github.com/pink-tools/pink-otel"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	otel "github.com/pink-tools/pink-otel"
 )
+
+var httpClient = &http.Client{Timeout: 30 * time.Second}
+
+const maxPendingFiles = 100
 
 type Bot struct {
 	api          *tgbotapi.BotAPI
@@ -41,6 +45,7 @@ func (b *Bot) Start(ctx context.Context) {
 	otel.Info(ctx, "telegram bot started", otel.Attr{K: "username", V: b.api.Self.UserName})
 
 	connected := true
+	backoff := 3 * time.Second
 	for {
 		select {
 		case <-ctx.Done():
@@ -54,10 +59,17 @@ func (b *Bot) Start(ctx context.Context) {
 				otel.Warn(ctx, "telegram disconnected, reconnecting...")
 				connected = false
 			}
-			time.Sleep(3 * time.Second)
+			time.Sleep(backoff)
+			if backoff < 60*time.Second {
+				backoff *= 2
+				if backoff > 60*time.Second {
+					backoff = 60 * time.Second
+				}
+			}
 			continue
 		}
 
+		backoff = 3 * time.Second
 		if !connected {
 			otel.Info(ctx, "telegram reconnected")
 			connected = true
@@ -93,13 +105,13 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	if msg.Photo != nil && len(msg.Photo) > 0 {
 		photo := msg.Photo[len(msg.Photo)-1]
 		if path, err := b.downloadFile(photo.FileID, "photo.jpg"); err == nil {
-			b.pendingFiles = append(b.pendingFiles, path)
+			b.addPendingFile(path)
 		}
 	}
 
 	if msg.Document != nil {
 		if path, err := b.downloadFile(msg.Document.FileID, msg.Document.FileName); err == nil {
-			b.pendingFiles = append(b.pendingFiles, path)
+			b.addPendingFile(path)
 		}
 	}
 
@@ -109,7 +121,7 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 			filename = msg.Video.FileName
 		}
 		if path, err := b.downloadFile(msg.Video.FileID, filename); err == nil {
-			b.pendingFiles = append(b.pendingFiles, path)
+			b.addPendingFile(path)
 		}
 	}
 
@@ -119,7 +131,7 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 			filename = msg.Audio.FileName
 		}
 		if path, err := b.downloadFile(msg.Audio.FileID, filename); err == nil {
-			b.pendingFiles = append(b.pendingFiles, path)
+			b.addPendingFile(path)
 		}
 	}
 
@@ -153,6 +165,7 @@ func (b *Bot) handleVoice(ctx context.Context, msg *tgbotapi.Message) {
 		b.SendMessage(msg.Chat.ID, "Failed to download voice: "+err.Error())
 		return
 	}
+	defer os.Remove(path)
 
 	transcribed, errMsg := b.handlers.HandleVoice(path)
 	b.setReaction(msg.Chat.ID, msg.MessageID, "")
@@ -164,13 +177,21 @@ func (b *Bot) handleVoice(ctx context.Context, msg *tgbotapi.Message) {
 	}
 }
 
+func (b *Bot) addPendingFile(path string) {
+	if len(b.pendingFiles) >= maxPendingFiles {
+		os.Remove(b.pendingFiles[0])
+		b.pendingFiles = b.pendingFiles[1:]
+	}
+	b.pendingFiles = append(b.pendingFiles, path)
+}
+
 func (b *Bot) downloadFile(fileID, filename string) (string, error) {
 	file, err := b.api.GetFile(tgbotapi.FileConfig{FileID: fileID})
 	if err != nil {
 		return "", err
 	}
 
-	resp, err := http.Get(file.Link(b.api.Token))
+	resp, err := httpClient.Get(file.Link(b.api.Token))
 	if err != nil {
 		return "", err
 	}

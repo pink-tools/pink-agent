@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -36,7 +37,7 @@ type Terminal struct {
 	pty           gopty.Pty
 	cmd           *gopty.Cmd
 	buffer        *RingBuffer
-	ready         bool
+	ready         atomic.Bool
 	queue         []string
 	utf8Remainder []byte
 	onExit        func(string)
@@ -51,7 +52,7 @@ func (t *Terminal) Write(text string) error {
 		return fmt.Errorf("terminal %s not running", t.name)
 	}
 
-	if !t.ready {
+	if !t.ready.Load() {
 		t.queue = append(t.queue, text)
 		return nil
 	}
@@ -63,14 +64,13 @@ func (t *Terminal) writeToPTY(text string) error {
 	if t.pty == nil {
 		return errors.New("pty not running")
 	}
-	t.writeAndSubmit(text)
-	return nil
+	return t.writeAndSubmit(text)
 }
 
-func (t *Terminal) writeAndSubmit(text string) {
+func (t *Terminal) writeAndSubmit(text string) error {
 	if t.pty == nil {
-		otel.Error(context.Background(), "writeAndSubmit: pty is nil", otel.Attr{K: "sessionID", V: t.sessionID[:8]})
-		return
+		otel.Error(context.Background(), "writeAndSubmit: pty is nil", otel.Attr{K: "sessionID", V: t.sessionID[:min(8, len(t.sessionID))]})
+		return errors.New("pty not running")
 	}
 
 	if runtime.GOOS == "windows" {
@@ -79,11 +79,15 @@ func (t *Terminal) writeAndSubmit(text string) {
 		data := []byte(text)
 		for i := 0; i < len(data); {
 			_, size := utf8.DecodeRune(data[i:])
-			t.pty.Write(data[i : i+size])
+			if _, err := t.pty.Write(data[i : i+size]); err != nil {
+				return fmt.Errorf("pty write: %w", err)
+			}
 			i += size
 		}
 	} else {
-		t.pty.Write([]byte(text))
+		if _, err := t.pty.Write([]byte(text)); err != nil {
+			return fmt.Errorf("pty write: %w", err)
+		}
 	}
 
 	delay := inputDelay
@@ -91,7 +95,10 @@ func (t *Terminal) writeAndSubmit(text string) {
 		delay = fileInputDelay
 	}
 	time.Sleep(delay)
-	t.pty.Write([]byte("\r"))
+	if _, err := t.pty.Write([]byte("\r")); err != nil {
+		return fmt.Errorf("pty write newline: %w", err)
+	}
+	return nil
 }
 
 var filePathRe = regexp.MustCompile(`(?m)^/[^\s]+\.\w+$`)
@@ -153,20 +160,24 @@ func (t *Terminal) stop() {
 
 	otel.Info(context.Background(), "session stopping", otel.Attr{K: "name", V: t.name})
 
-	if t.cmd.Process != nil {
-		t.cmd.Process.Kill()
-		go t.cmd.Wait()
+	cmd := t.cmd
+	if cmd.Process != nil {
+		cmd.Process.Kill()
+		go cmd.Wait()
 	}
 	if t.pty != nil {
 		t.pty.Close()
 	}
 	t.cmd = nil
 	t.pty = nil
-	t.ready = false
+	t.ready.Store(false)
 }
 
 func (t *Terminal) readLoop(pty gopty.Pty) {
 	defer func() {
+		if r := recover(); r != nil {
+			otel.Error(context.Background(), "readLoop panic", otel.Attr{K: "recover", V: fmt.Sprintf("%v", r)}, otel.Attr{K: "sessionID", V: t.sessionID[:min(8, len(t.sessionID))]})
+		}
 		if t.onExit != nil {
 			t.onExit(t.sessionID)
 		}
@@ -184,7 +195,7 @@ func (t *Terminal) readLoop(pty gopty.Pty) {
 				if cmd.ProcessState != nil && !cmd.ProcessState.Success() {
 					otel.Error(context.Background(), "claude exited with error",
 						otel.Attr{K: "exitCode", V: cmd.ProcessState.ExitCode()},
-						otel.Attr{K: "sessionID", V: t.sessionID[:8]},
+						otel.Attr{K: "sessionID", V: t.sessionID[:min(8, len(t.sessionID))]},
 					)
 				}
 			}
@@ -212,10 +223,8 @@ func (t *Terminal) readLoop(pty gopty.Pty) {
 
 		t.buffer.Write(data)
 
-		if !t.ready && bytes.Contains(t.buffer.Bytes(), readyMarker) {
-			t.mu.Lock()
-			t.ready = true
-			t.mu.Unlock()
+		if !t.ready.Load() && bytes.Contains(t.buffer.Bytes(), readyMarker) {
+			t.ready.Store(true)
 			go t.flushQueue()
 		}
 
@@ -226,6 +235,12 @@ func (t *Terminal) readLoop(pty gopty.Pty) {
 }
 
 func (t *Terminal) flushQueue() {
+	defer func() {
+		if r := recover(); r != nil {
+			otel.Error(context.Background(), "flushQueue panic", otel.Attr{K: "recover", V: fmt.Sprintf("%v", r)}, otel.Attr{K: "sessionID", V: t.sessionID[:min(8, len(t.sessionID))]})
+		}
+	}()
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -241,7 +256,9 @@ func (t *Terminal) flushQueue() {
 	if t.pty == nil {
 		return
 	}
-	t.writeAndSubmit(combined)
+	if err := t.writeAndSubmit(combined); err != nil {
+		otel.Error(context.Background(), "flushQueue write failed", otel.Attr{K: "error", V: err.Error()}, otel.Attr{K: "sessionID", V: t.sessionID[:min(8, len(t.sessionID))]})
+	}
 }
 
 // Manager manages all Terminal instances
@@ -270,7 +287,7 @@ func (m *Manager) SetTerminalSize(cols, rows uint16) {
 	m.ResizeAll(cols, rows)
 }
 
-func (m *Manager) StartSession(sessionID, name string) {
+func (m *Manager) StartSession(sessionID, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -300,8 +317,7 @@ func (m *Manager) StartSession(sessionID, name string) {
 
 	p, err := gopty.New()
 	if err != nil {
-		otel.Error(context.Background(), "failed to create pty", otel.Attr{K: "error", V: err.Error()}, otel.Attr{K: "sessionID", V: sessionID})
-		return
+		return fmt.Errorf("create pty: %w", err)
 	}
 
 	if m.cols > 0 && m.rows > 0 {
@@ -321,9 +337,8 @@ func (m *Manager) StartSession(sessionID, name string) {
 	cmd.Dir = core.BaseDir()
 
 	if err := cmd.Start(); err != nil {
-		otel.Error(context.Background(), "failed to start pty command", otel.Attr{K: "error", V: err.Error()}, otel.Attr{K: "sessionID", V: sessionID}, otel.Attr{K: "command", V: command})
 		p.Close()
-		return
+		return fmt.Errorf("start pty command %s: %w", command, err)
 	}
 
 	t.pty = p
@@ -331,6 +346,7 @@ func (m *Manager) StartSession(sessionID, name string) {
 	m.terminals[sessionID] = t
 
 	go t.readLoop(p)
+	return nil
 }
 
 func (m *Manager) StopSession(sessionID string) {
@@ -359,7 +375,7 @@ func (m *Manager) Write(sessionID, text string) error {
 	m.mu.Unlock()
 
 	if !ok {
-		return fmt.Errorf("no terminal for session %s", sessionID[:8])
+		return fmt.Errorf("no terminal for session %s", sessionID[:min(8, len(sessionID))])
 	}
 	return t.Write(text)
 }

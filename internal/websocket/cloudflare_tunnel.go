@@ -2,12 +2,14 @@ package websocket
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Tunnel struct {
@@ -18,14 +20,17 @@ type Tunnel struct {
 	ready      chan struct{}
 	readyOnce  sync.Once
 	configPath string
+	crashErr   error
+	crashed    chan struct{}
 }
 
 func New(name, id string, port int) *Tunnel {
 	return &Tunnel{
-		name:  name,
-		id:    id,
-		port:  port,
-		ready: make(chan struct{}),
+		name:    name,
+		id:      id,
+		port:    port,
+		ready:   make(chan struct{}),
+		crashed: make(chan struct{}),
 	}
 }
 
@@ -66,6 +71,16 @@ ingress:
 	// Monitor stderr for "Registered tunnel connection"
 	go t.monitorReady(stderr)
 
+	// Detect tunnel crash — capture cmd locally to avoid nil deref
+	cmd := t.cmd
+	go func() {
+		err := cmd.Wait()
+		if err != nil {
+			t.crashErr = err
+		}
+		close(t.crashed)
+	}()
+
 	return nil
 }
 
@@ -86,19 +101,34 @@ func (t *Tunnel) monitorReady(stderr io.Reader) {
 	}
 }
 
-// WaitReady blocks until tunnel is connected to Cloudflare edge
-func (t *Tunnel) WaitReady() {
-	<-t.ready
+// WaitReady blocks until tunnel is connected to Cloudflare edge or 30s timeout.
+func (t *Tunnel) WaitReady() error {
+	select {
+	case <-t.ready:
+		return nil
+	case <-time.After(30 * time.Second):
+		return errors.New("tunnel not ready after 30s")
+	}
 }
 
 func (t *Tunnel) Stop() {
 	if t.cmd != nil && t.cmd.Process != nil {
 		t.cmd.Process.Kill()
-		t.cmd.Wait()
+		<-t.crashed // wait for the monitor goroutine to finish
 	}
 	if t.configPath != "" {
 		os.Remove(t.configPath)
 	}
+}
+
+// Crashed returns a channel that is closed when the tunnel process exits unexpectedly.
+func (t *Tunnel) Crashed() <-chan struct{} {
+	return t.crashed
+}
+
+// CrashError returns the error from the tunnel process crash, if any.
+func (t *Tunnel) CrashError() error {
+	return t.crashErr
 }
 
 func (t *Tunnel) URL() string {
