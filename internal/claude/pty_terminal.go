@@ -21,8 +21,7 @@ import (
 )
 
 var readyMarker = []byte("bypass")
-var tokensMarker = []byte("tokens")
-var numberRe = regexp.MustCompile(`\d+`)
+var contextTokensRe = regexp.MustCompile(`(\d+)\x1b\[1Ctokens`)
 
 const (
 	inputDelay     = 250 * time.Millisecond
@@ -131,16 +130,11 @@ func (t *Terminal) Buffer() []byte {
 
 func (t *Terminal) Tokens() string {
 	buf := t.buffer.Bytes()
-	idx := bytes.LastIndex(buf, tokensMarker)
-	if idx == -1 {
-		return ""
-	}
-	before := buf[:idx]
-	matches := numberRe.FindAll(before, -1)
+	matches := contextTokensRe.FindAllSubmatch(buf, -1)
 	if len(matches) == 0 {
 		return ""
 	}
-	return string(matches[len(matches)-1])
+	return string(matches[len(matches)-1][1])
 }
 
 func (t *Terminal) isRunning() bool {
