@@ -5,12 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	gopty "github.com/aymanbagabas/go-pty"
 	core "github.com/pink-tools/pink-core"
@@ -71,7 +72,20 @@ func (t *Terminal) writeAndSubmit(text string) {
 		otel.Error(context.Background(), "writeAndSubmit: pty is nil", otel.Attr{K: "sessionID", V: t.sessionID[:8]})
 		return
 	}
-	io.Copy(t.pty, strings.NewReader(text))
+
+	if runtime.GOOS == "windows" {
+		// Write rune by rune — bulk writes to ConPTY trigger Claude Code's
+		// paste mode which truncates input (keeps only last buffer chunk).
+		data := []byte(text)
+		for i := 0; i < len(data); {
+			_, size := utf8.DecodeRune(data[i:])
+			t.pty.Write(data[i : i+size])
+			i += size
+		}
+	} else {
+		t.pty.Write([]byte(text))
+	}
+
 	delay := inputDelay
 	if containsFilePath(text) {
 		delay = fileInputDelay
