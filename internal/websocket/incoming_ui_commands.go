@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	otel "github.com/pink-tools/pink-otel"
+	"github.com/pink-tools/pink-core/log"
 	"pink-agent/internal/claude"
 	"pink-agent/internal/projects"
 )
@@ -103,7 +103,7 @@ func (s *Server) handleProjectCreate(ctx context.Context, req Request) *Error {
 		return mapError(err)
 	}
 
-	otel.Info(ctx, "project created", otel.Attr{K: "name", V: params.Name})
+	log.Info(ctx, "project created", log.Attr{K: "name", V: params.Name})
 	if project := s.state.State().GetActiveProject(); project != nil {
 		s.store.InitProjectContext(project.ID)
 	}
@@ -131,7 +131,7 @@ func (s *Server) handleProjectDelete(ctx context.Context, req Request) *Error {
 		return mapError(err)
 	}
 
-	otel.Info(ctx, "project deleted", otel.Attr{K: "name", V: projectName})
+	log.Info(ctx, "project deleted", log.Attr{K: "name", V: projectName})
 	return nil
 }
 
@@ -171,7 +171,7 @@ func (s *Server) handleProjectSwitch(ctx context.Context, req Request) *Error {
 	if newProject != nil {
 		for _, sess := range newProject.Sessions {
 			if err := s.pty.StartSession(sess.ClaudeID, sess.Name); err != nil {
-				otel.Error(ctx, "start session failed", otel.Attr{K: "session", V: sess.Name}, otel.Attr{K: "error", V: err.Error()})
+				log.Error(ctx, "start session failed", log.Attr{K: "session", V: sess.Name}, log.Attr{K: "error", V: err.Error()})
 			}
 		}
 	}
@@ -183,7 +183,7 @@ func (s *Server) handleProjectSwitch(ctx context.Context, req Request) *Error {
 	if newProject != nil {
 		toName = newProject.Name
 	}
-	otel.Info(ctx, "project switch", otel.Attr{K: "from", V: fromName}, otel.Attr{K: "to", V: toName})
+	log.Info(ctx, "project switch", log.Attr{K: "from", V: fromName}, log.Attr{K: "to", V: toName})
 
 	// Send buffer of new active session
 	if sess := s.state.State().GetActiveSession(); sess != nil {
@@ -219,19 +219,19 @@ func (s *Server) handleSessionCreate(ctx context.Context, req Request) *Error {
 		projectName, projectCtx := s.getProjectInfo()
 		claudeID, err := claude.CreateSession(projectName, projectCtx)
 		if err != nil {
-			otel.Error(ctx, "create session failed", otel.Attr{K: "error", V: err.Error()})
+			log.Error(ctx, "create session failed", log.Attr{K: "error", V: err.Error()})
 			s.state.FailPendingSession(pending, err.Error())
 			return
 		}
 
 		if err := s.state.FinishPendingSession(pending, claudeID); err != nil {
-			otel.Error(ctx, "finish session failed", otel.Attr{K: "error", V: err.Error()})
+			log.Error(ctx, "finish session failed", log.Attr{K: "error", V: err.Error()})
 			return
 		}
 
-		otel.Info(ctx, "session created", otel.Attr{K: "name", V: name}, otel.Attr{K: "id", V: claudeID})
+		log.Info(ctx, "session created", log.Attr{K: "name", V: name}, log.Attr{K: "id", V: claudeID})
 		if err := s.pty.StartSession(claudeID, name); err != nil {
-			otel.Error(ctx, "start session failed", otel.Attr{K: "name", V: name}, otel.Attr{K: "error", V: err.Error()})
+			log.Error(ctx, "start session failed", log.Attr{K: "name", V: name}, log.Attr{K: "error", V: err.Error()})
 		}
 	}(project.ID, sessionName, pendingID)
 
@@ -257,7 +257,7 @@ func (s *Server) handleSessionDelete(ctx context.Context, req Request) *Error {
 		return mapError(err)
 	}
 
-	otel.Info(ctx, "session deleted", otel.Attr{K: "name", V: sessionName})
+	log.Info(ctx, "session deleted", log.Attr{K: "name", V: sessionName})
 	return nil
 }
 
@@ -295,12 +295,12 @@ func (s *Server) handleSessionSwitch(ctx context.Context, req Request) *Error {
 		}
 		for _, sess := range newProject.Sessions {
 			if err := s.pty.StartSession(sess.ClaudeID, sess.Name); err != nil {
-				otel.Error(ctx, "start session failed", otel.Attr{K: "session", V: sess.Name}, otel.Attr{K: "error", V: err.Error()})
+				log.Error(ctx, "start session failed", log.Attr{K: "session", V: sess.Name}, log.Attr{K: "error", V: err.Error()})
 			}
 		}
 	}
 
-	otel.Info(ctx, "session switch", otel.Attr{K: "sessionId", V: truncateID(params.ClaudeID)})
+	log.Info(ctx, "session switch", log.Attr{K: "sessionId", V: truncateID(params.ClaudeID)})
 
 	s.sendEvent("terminal.buffer", map[string]string{
 		"sessionId": params.ClaudeID,

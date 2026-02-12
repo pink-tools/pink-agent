@@ -16,8 +16,8 @@ github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aN
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/joho/godotenv v1.5.1 h1:7eLL/+HRGLY0ldzfGMeQkb7vMd0as4CfYvUVzLqw0N0=
 github.com/joho/godotenv v1.5.1/go.mod h1:f4LDr5Voq0i2e/R5DDNOoa2zzDfwtkZa6DnEwAbqwq4=
-github.com/pink-tools/pink-core v1.8.0 h1:Js6MDcVl3BkrDGIrvOS6yApUkMdA5LmN1utoflrr6yw=
-github.com/pink-tools/pink-core v1.8.0/go.mod h1:/m0/6dltV1iEJpAA+CYq5YC+1eJpbR+zJhd4OWHZSl4=
+github.com/pink-tools/pink-core v1.8.1 h1:cx/TRawF47D9tBk4fsNAEXDgQH0WwIbekBuWL0kJTBs=
+github.com/pink-tools/pink-core v1.8.1/go.mod h1:m8DDgmEXj/3W/l66ZaL6gJ/LkbPZbI6aOK6iKQPSCz8=
 github.com/pink-tools/pink-otel v1.8.0 h1:c17r+AYVqUqz/ncCzfhnkK/buikKtGgFu56pPkdIRoA=
 github.com/pink-tools/pink-otel v1.8.0/go.mod h1:+bdZ9DS90ONsjis1aCMobE2KcIQbJ1szFN1ZBdAVsJs=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=

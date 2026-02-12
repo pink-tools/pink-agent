@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/pink-tools/pink-core"
-	otel "github.com/pink-tools/pink-otel"
+	"github.com/pink-tools/pink-core/log"
 	"pink-agent/internal/cli"
 	"pink-agent/internal/claude"
 	"pink-agent/internal/config"
@@ -343,7 +343,7 @@ func runDaemon(ctx context.Context, dataDir string) error {
 	if err := tun.WaitReady(); err != nil {
 		return fmt.Errorf("tunnel ready: %w", err)
 	}
-	otel.Info(ctx, "tunnel ready", otel.Attr{K: "url", V: tun.URL()})
+	log.Info(ctx, "tunnel ready", log.Attr{K: "url", V: tun.URL()})
 
 	// Initialize WebSocket server
 	wsServer := websocket.NewServer(stateManager, ptyManager, fileStore, cfg.TelegramBotToken, cfg.TelegramUserID)
@@ -354,7 +354,7 @@ func runDaemon(ctx context.Context, dataDir string) error {
 	if project := stateManager.State().GetActiveProject(); project != nil {
 		for _, sess := range project.Sessions {
 			if err := ptyManager.StartSession(sess.ClaudeID, sess.Name); err != nil {
-				otel.Error(ctx, "failed to start session", otel.Attr{K: "name", V: sess.Name}, otel.Attr{K: "error", V: err.Error()})
+				log.Error(ctx, "failed to start session", log.Attr{K: "name", V: sess.Name}, log.Attr{K: "error", V: err.Error()})
 			}
 		}
 	}
@@ -394,7 +394,7 @@ func runDaemon(ctx context.Context, dataDir string) error {
 	// Set menu button
 	webAppURL := fmt.Sprintf("%s?api=%s", webAppBaseURL, url.QueryEscape(tun.URL()))
 	if err := bot.SetMenuButton(webAppURL); err != nil {
-		otel.Warn(ctx, "failed to set menu button", otel.Attr{K: "error", V: err.Error()})
+		log.Warn(ctx, "failed to set menu button", log.Attr{K: "error", V: err.Error()})
 	}
 
 	bot.SendMessage(cfg.TelegramUserID, "🦄 Pink Agent activated and ready to work")
@@ -402,7 +402,7 @@ func runDaemon(ctx context.Context, dataDir string) error {
 	botCtx, botCancel := context.WithCancel(ctx)
 	go bot.Start(botCtx)
 
-	otel.Info(ctx, "ready", otel.Attr{K: "url", V: webAppURL})
+	log.Info(ctx, "ready", log.Attr{K: "url", V: webAppURL})
 
 	select {
 	case <-ctx.Done():

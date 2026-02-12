@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	otel "github.com/pink-tools/pink-otel"
+	"github.com/pink-tools/pink-core/log"
 	"pink-agent/internal/projects"
 )
 
@@ -99,7 +99,7 @@ func (s *Server) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		initData := r.URL.Query().Get("initData")
 		if err := validateTelegramAuth(initData, s.botToken, s.userID); err != nil {
-			otel.Warn(r.Context(), "websocket auth failed", otel.Attr{K: "error", V: err.Error()})
+			log.Warn(r.Context(), "websocket auth failed", log.Attr{K: "error", V: err.Error()})
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -138,7 +138,7 @@ func (s *Server) handleConnection(ctx context.Context, w http.ResponseWriter, r 
 	s.sendCh = sendCh
 	s.connMu.Unlock()
 
-	otel.Info(ctx, "mini app connected")
+	log.Info(ctx, "mini app connected")
 
 	conn.SetReadDeadline(time.Now().Add(pongWait))
 	conn.SetPongHandler(func(string) error {
@@ -160,7 +160,7 @@ func (s *Server) handleConnection(ctx context.Context, w http.ResponseWriter, r 
 
 	s.readLoop(ctx, conn)
 
-	otel.Info(ctx, "mini app disconnected")
+	log.Info(ctx, "mini app disconnected")
 }
 
 func (s *Server) pingLoop(conn *websocket.Conn) {

@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/pink-tools/pink-core"
-	otel "github.com/pink-tools/pink-otel"
+	"github.com/pink-tools/pink-core/log"
 )
 
 // PTYWriter interface for writing to PTY
@@ -47,14 +47,14 @@ func (h *Handlers) HandleMessage(text string, files []string) string {
 	if len(preview) > 50 {
 		preview = preview[:50] + "..."
 	}
-	attrs := []otel.Attr{{K: "text", V: preview}}
+	attrs := []log.Attr{{K: "text", V: preview}}
 	if len(files) > 0 {
-		attrs = append(attrs, otel.Attr{K: "files", V: len(files)})
+		attrs = append(attrs, log.Attr{K: "files", V: len(files)})
 	}
-	otel.Info(context.Background(), "message received", attrs...)
+	log.Info(context.Background(), "message received", attrs...)
 
 	if err := h.pty.Write(message); err != nil {
-		otel.Error(context.Background(), "pty write failed", otel.Attr{K: "error", V: err.Error()})
+		log.Error(context.Background(), "pty write failed", log.Attr{K: "error", V: err.Error()})
 		return err.Error()
 	}
 	return ""
@@ -77,11 +77,11 @@ func (h *Handlers) HandleVoice(audioPath string) (transcribed string, errMsg str
 	if len(preview) > 50 {
 		preview = preview[:50] + "..."
 	}
-	otel.Info(context.Background(), "message received", otel.Attr{K: "text", V: "🎤 " + preview})
+	log.Info(context.Background(), "message received", log.Attr{K: "text", V: "🎤 " + preview})
 
 	voicePrefix := "[VOICE INPUT: May contain speech recognition errors. Ask for clarification if unclear.] "
 	if err := h.pty.Write(voicePrefix + text); err != nil {
-		otel.Error(context.Background(), "pty write failed", otel.Attr{K: "error", V: err.Error()})
+		log.Error(context.Background(), "pty write failed", log.Attr{K: "error", V: err.Error()})
 		return "", err.Error()
 	}
 	return text, ""

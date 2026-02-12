@@ -16,7 +16,7 @@ import (
 
 	gopty "github.com/aymanbagabas/go-pty"
 	core "github.com/pink-tools/pink-core"
-	otel "github.com/pink-tools/pink-otel"
+	"github.com/pink-tools/pink-core/log"
 	"pink-agent/internal/platform"
 )
 
@@ -68,7 +68,7 @@ func (t *Terminal) writeToPTY(text string) error {
 
 func (t *Terminal) writeAndSubmit(text string) error {
 	if t.pty == nil {
-		otel.Error(context.Background(), "writeAndSubmit: pty is nil", otel.Attr{K: "sessionID", V: t.sessionID[:min(8, len(t.sessionID))]})
+		log.Error(context.Background(), "writeAndSubmit: pty is nil", log.Attr{K: "sessionID", V: t.sessionID[:min(8, len(t.sessionID))]})
 		return errors.New("pty not running")
 	}
 
@@ -152,7 +152,7 @@ func (t *Terminal) stop() {
 		return
 	}
 
-	otel.Info(context.Background(), "session stopping", otel.Attr{K: "name", V: t.name})
+	log.Info(context.Background(), "session stopping", log.Attr{K: "name", V: t.name})
 
 	cmd := t.cmd
 	if cmd.Process != nil {
@@ -170,7 +170,7 @@ func (t *Terminal) stop() {
 func (t *Terminal) readLoop(pty gopty.Pty) {
 	defer func() {
 		if r := recover(); r != nil {
-			otel.Error(context.Background(), "readLoop panic", otel.Attr{K: "recover", V: fmt.Sprintf("%v", r)}, otel.Attr{K: "sessionID", V: t.sessionID[:min(8, len(t.sessionID))]})
+			log.Error(context.Background(), "readLoop panic", log.Attr{K: "recover", V: fmt.Sprintf("%v", r)}, log.Attr{K: "sessionID", V: t.sessionID[:min(8, len(t.sessionID))]})
 		}
 		if t.onExit != nil {
 			t.onExit(t.sessionID)
@@ -187,9 +187,9 @@ func (t *Terminal) readLoop(pty gopty.Pty) {
 			if cmd != nil {
 				cmd.Wait()
 				if cmd.ProcessState != nil && !cmd.ProcessState.Success() {
-					otel.Error(context.Background(), "claude exited with error",
-						otel.Attr{K: "exitCode", V: cmd.ProcessState.ExitCode()},
-						otel.Attr{K: "sessionID", V: t.sessionID[:min(8, len(t.sessionID))]},
+					log.Error(context.Background(), "claude exited with error",
+						log.Attr{K: "exitCode", V: cmd.ProcessState.ExitCode()},
+						log.Attr{K: "sessionID", V: t.sessionID[:min(8, len(t.sessionID))]},
 					)
 				}
 			}
@@ -231,14 +231,14 @@ func (t *Terminal) readLoop(pty gopty.Pty) {
 func (t *Terminal) flushQueue() {
 	defer func() {
 		if r := recover(); r != nil {
-			otel.Error(context.Background(), "flushQueue panic", otel.Attr{K: "recover", V: fmt.Sprintf("%v", r)}, otel.Attr{K: "sessionID", V: t.sessionID[:min(8, len(t.sessionID))]})
+			log.Error(context.Background(), "flushQueue panic", log.Attr{K: "recover", V: fmt.Sprintf("%v", r)}, log.Attr{K: "sessionID", V: t.sessionID[:min(8, len(t.sessionID))]})
 		}
 	}()
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	otel.Info(context.Background(), "session ready", otel.Attr{K: "name", V: t.name}, otel.Attr{K: "queueLen", V: len(t.queue)})
+	log.Info(context.Background(), "session ready", log.Attr{K: "name", V: t.name}, log.Attr{K: "queueLen", V: len(t.queue)})
 
 	if len(t.queue) == 0 {
 		return
@@ -251,7 +251,7 @@ func (t *Terminal) flushQueue() {
 		return
 	}
 	if err := t.writeAndSubmit(combined); err != nil {
-		otel.Error(context.Background(), "flushQueue write failed", otel.Attr{K: "error", V: err.Error()}, otel.Attr{K: "sessionID", V: t.sessionID[:min(8, len(t.sessionID))]})
+		log.Error(context.Background(), "flushQueue write failed", log.Attr{K: "error", V: err.Error()}, log.Attr{K: "sessionID", V: t.sessionID[:min(8, len(t.sessionID))]})
 	}
 }
 
@@ -303,11 +303,11 @@ func (m *Manager) StartSession(sessionID, name string) error {
 		defer m.mu.Unlock()
 		if m.terminals[id] == t {
 			delete(m.terminals, id)
-			otel.Info(context.Background(), "terminal self-cleanup", otel.Attr{K: "name", V: name})
+			log.Info(context.Background(), "terminal self-cleanup", log.Attr{K: "name", V: name})
 		}
 	}
 
-	otel.Info(context.Background(), "session starting", otel.Attr{K: "name", V: name})
+	log.Info(context.Background(), "session starting", log.Attr{K: "name", V: name})
 
 	p, err := gopty.New()
 	if err != nil {

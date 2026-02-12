@@ -11,7 +11,7 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	otel "github.com/pink-tools/pink-otel"
+	"github.com/pink-tools/pink-core/log"
 )
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -42,7 +42,7 @@ func (b *Bot) Start(ctx context.Context) {
 	config := tgbotapi.NewUpdate(0)
 	config.Timeout = 60
 
-	otel.Info(ctx, "telegram bot started", otel.Attr{K: "username", V: b.api.Self.UserName})
+	log.Info(ctx, "telegram bot started", log.Attr{K: "username", V: b.api.Self.UserName})
 
 	connected := true
 	backoff := 3 * time.Second
@@ -56,7 +56,7 @@ func (b *Bot) Start(ctx context.Context) {
 		updates, err := b.api.GetUpdates(config)
 		if err != nil {
 			if connected {
-				otel.Warn(ctx, "telegram disconnected, reconnecting...")
+				log.Warn(ctx, "telegram disconnected, reconnecting...")
 				connected = false
 			}
 			time.Sleep(backoff)
@@ -71,7 +71,7 @@ func (b *Bot) Start(ctx context.Context) {
 
 		backoff = 3 * time.Second
 		if !connected {
-			otel.Info(ctx, "telegram reconnected")
+			log.Info(ctx, "telegram reconnected")
 			connected = true
 		}
 
