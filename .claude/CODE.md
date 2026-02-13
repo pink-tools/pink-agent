@@ -60,8 +60,14 @@ Tests = knowing. Assumptions = guessing.
 - Workarounds
 
 ### Git Commits
-- No AI signatures, co-authored-by, or generated-by messages
-- Short, lowercase commit messages: `initial commit`, `fix auth bug`, `add user export`
+
+[Conventional Commits](https://www.conventionalcommits.org/): `type: description`
+
+Types: `feat`, `fix`, `docs`, `refactor`, `chore`, `test`
+
+Body (optional): prose explaining why, not technical details. No bullet points, no line counts, no AI bullshit.
+
+Forbidden: AI signatures, co-authored-by, emojis.
 
 ## Goal
 

@@ -4,13 +4,7 @@ Remote terminal control via Telegram with real-time WebSocket streaming.
 
 ## Installation
 
-Download from [releases](https://github.com/pink-tools/pink-agent/releases):
-
-```bash
-curl -L https://github.com/pink-tools/pink-agent/releases/latest/download/pink-agent-darwin-arm64 -o pink-agent
-chmod +x pink-agent
-sudo mv pink-agent /usr/local/bin/
-```
+Install via [pink-orchestrator](https://github.com/pink-tools/pink-orchestrator) (recommended), or download binary from [Releases](https://github.com/pink-tools/pink-agent/releases) into `/Users/pink-tools/pink-agent/`.
 
 ## Requirements
 
