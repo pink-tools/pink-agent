@@ -20,6 +20,8 @@ github.com/pink-tools/pink-core v1.8.1 h1:cx/TRawF47D9tBk4fsNAEXDgQH0WwIbekBuWL0
 github.com/pink-tools/pink-core v1.8.1/go.mod h1:m8DDgmEXj/3W/l66ZaL6gJ/LkbPZbI6aOK6iKQPSCz8=
 github.com/pink-tools/pink-core v1.8.3 h1:BLDHrcLVimExCEEWAOuTJTBdfbQqahUKGyL1UWt9ouU=
 github.com/pink-tools/pink-core v1.8.3/go.mod h1:m8DDgmEXj/3W/l66ZaL6gJ/LkbPZbI6aOK6iKQPSCz8=
+github.com/pink-tools/pink-core v1.8.4 h1:VG7QmfNQDqy25N4MC0m8MZdc1L5t5QHtLLBWBHn139s=
+github.com/pink-tools/pink-core v1.8.4/go.mod h1:m8DDgmEXj/3W/l66ZaL6gJ/LkbPZbI6aOK6iKQPSCz8=
 github.com/pink-tools/pink-otel v1.8.0 h1:c17r+AYVqUqz/ncCzfhnkK/buikKtGgFu56pPkdIRoA=
 github.com/pink-tools/pink-otel v1.8.0/go.mod h1:+bdZ9DS90ONsjis1aCMobE2KcIQbJ1szFN1ZBdAVsJs=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=

@@ -5,8 +5,6 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/pink-tools/pink-core"
@@ -94,7 +92,7 @@ func transcribe(audioPath string) (string, error) {
 		return "", err
 	}
 
-	cmd := exec.Command(transcriberPath(), "transcribe", audioPath)
+	cmd := exec.Command(core.BinaryPath("pink-transcriber"), "transcribe", audioPath)
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -104,12 +102,4 @@ func transcribe(audioPath string) (string, error) {
 	}
 
 	return strings.TrimSpace(string(out)), nil
-}
-
-func transcriberPath() string {
-	name := "pink-transcriber"
-	if runtime.GOOS == "windows" {
-		name = "pink-transcriber.exe"
-	}
-	return filepath.Join(core.ServiceDir("pink-transcriber"), name)
 }
