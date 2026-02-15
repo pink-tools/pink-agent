@@ -7,12 +7,10 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	gopty "github.com/aymanbagabas/go-pty"
 	core "github.com/pink-tools/pink-core"
@@ -72,21 +70,12 @@ func (t *Terminal) writeAndSubmit(text string) error {
 		return errors.New("pty not running")
 	}
 
-	if runtime.GOOS == "windows" {
-		// Write rune by rune — bulk writes to ConPTY trigger Claude Code's
-		// paste mode which truncates input (keeps only last buffer chunk).
-		data := []byte(text)
-		for i := 0; i < len(data); {
-			_, size := utf8.DecodeRune(data[i:])
-			if _, err := t.pty.Write(data[i : i+size]); err != nil {
-				return fmt.Errorf("pty write: %w", err)
-			}
-			i += size
-		}
-	} else {
-		if _, err := t.pty.Write([]byte(text)); err != nil {
-			return fmt.Errorf("pty write: %w", err)
-		}
+	// Wrap in bracket paste sequences — same as terminal Ctrl+V.
+	// Claude Code (Ink) sees one paste event instead of N individual keystrokes,
+	// avoiding N re-renders that cause pipe backpressure and truncation.
+	paste := "\x1b[200~" + text + "\x1b[201~"
+	if _, err := t.pty.Write([]byte(paste)); err != nil {
+		return fmt.Errorf("pty write: %w", err)
 	}
 
 	delay := inputDelay
