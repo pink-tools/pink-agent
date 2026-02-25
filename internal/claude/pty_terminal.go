@@ -20,6 +20,7 @@ import (
 
 var readyMarker = []byte("bypass")
 var trustMarker = []byte("trustthisfolder")
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[\x20-\x7e]`)
 var contextTokensRe = regexp.MustCompile(`(\d+)\x1b\[1Ctokens`)
 
 const (
@@ -209,9 +210,9 @@ func (t *Terminal) readLoop(pty gopty.Pty) {
 		t.buffer.Write(data)
 
 		if !t.trustAccepted.Load() {
-			raw := t.buffer.Bytes()
-			letters := make([]byte, 0, len(raw))
-			for _, b := range raw {
+			stripped := ansiRe.ReplaceAll(t.buffer.Bytes(), nil)
+			letters := make([]byte, 0, len(stripped))
+			for _, b := range stripped {
 				if b >= 'a' && b <= 'z' {
 					letters = append(letters, b)
 				} else if b >= 'A' && b <= 'Z' {
