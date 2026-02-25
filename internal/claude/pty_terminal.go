@@ -19,6 +19,8 @@ import (
 )
 
 var readyMarker = []byte("bypass")
+var trustMarker = []byte("trust this folder")
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
 var contextTokensRe = regexp.MustCompile(`(\d+)\x1b\[1Ctokens`)
 
 const (
@@ -35,6 +37,7 @@ type Terminal struct {
 	cmd           *gopty.Cmd
 	buffer        *RingBuffer
 	ready         atomic.Bool
+	trustAccepted atomic.Bool
 	queue         []string
 	utf8Remainder []byte
 	onExit        func(string)
@@ -206,8 +209,18 @@ func (t *Terminal) readLoop(pty gopty.Pty) {
 
 		t.buffer.Write(data)
 
+		if !t.trustAccepted.Load() {
+			stripped := ansiRe.ReplaceAll(t.buffer.Bytes(), nil)
+			if bytes.Contains(stripped, trustMarker) {
+				t.trustAccepted.Store(true)
+				pty.Write([]byte("\r"))
+				log.Info(context.Background(), "workspace trust accepted", log.Attr{K: "name", V: t.name})
+			}
+		}
+
 		if !t.ready.Load() && bytes.Contains(t.buffer.Bytes(), readyMarker) {
 			t.ready.Store(true)
+			t.trustAccepted.Store(true)
 			go t.flushQueue()
 		}
 
