@@ -19,8 +19,7 @@ import (
 )
 
 var readyMarker = []byte("bypass")
-var trustMarker = []byte("trust this folder")
-var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
+var trustMarker = []byte("trustthisfolder")
 var contextTokensRe = regexp.MustCompile(`(\d+)\x1b\[1Ctokens`)
 
 const (
@@ -210,8 +209,16 @@ func (t *Terminal) readLoop(pty gopty.Pty) {
 		t.buffer.Write(data)
 
 		if !t.trustAccepted.Load() {
-			stripped := ansiRe.ReplaceAll(t.buffer.Bytes(), nil)
-			if bytes.Contains(stripped, trustMarker) {
+			raw := t.buffer.Bytes()
+			letters := make([]byte, 0, len(raw))
+			for _, b := range raw {
+				if b >= 'a' && b <= 'z' {
+					letters = append(letters, b)
+				} else if b >= 'A' && b <= 'Z' {
+					letters = append(letters, b|0x20)
+				}
+			}
+			if bytes.Contains(letters, trustMarker) {
 				t.trustAccepted.Store(true)
 				pty.Write([]byte("\r"))
 				log.Info(context.Background(), "workspace trust accepted", log.Attr{K: "name", V: t.name})
