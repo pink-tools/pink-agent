@@ -26,6 +26,8 @@ github.com/pink-tools/pink-core v1.8.5 h1:wsZ7UPdsYek29rENOVfacVrHSfbY8nhBrRJgb0
 github.com/pink-tools/pink-core v1.8.5/go.mod h1:m8DDgmEXj/3W/l66ZaL6gJ/LkbPZbI6aOK6iKQPSCz8=
 github.com/pink-tools/pink-otel v1.8.0 h1:c17r+AYVqUqz/ncCzfhnkK/buikKtGgFu56pPkdIRoA=
 github.com/pink-tools/pink-otel v1.8.0/go.mod h1:+bdZ9DS90ONsjis1aCMobE2KcIQbJ1szFN1ZBdAVsJs=
+github.com/pink-tools/pink-otel v1.8.1 h1:BvYWBkkOh+TWjPjX1wv8Xlln/d5YODWpbRD55oEtqQM=
+github.com/pink-tools/pink-otel v1.8.1/go.mod h1:+bdZ9DS90ONsjis1aCMobE2KcIQbJ1szFN1ZBdAVsJs=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=

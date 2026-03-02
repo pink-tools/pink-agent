@@ -11,7 +11,7 @@ require (
 
 require (
 	github.com/joho/godotenv v1.5.1 // indirect
-	github.com/pink-tools/pink-otel v1.8.0 // indirect
+	github.com/pink-tools/pink-otel v1.8.1 // indirect
 )
 
 require (
