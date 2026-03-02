@@ -337,7 +337,7 @@ func (m *Manager) StartSession(sessionID, name string) error {
 	}
 
 	cmd := p.Command(command, args...)
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	cmd.Env = append(cleanEnv(), "TERM=xterm-256color")
 	cmd.Dir = core.BaseDir()
 
 	if err := cmd.Start(); err != nil {
@@ -529,4 +529,17 @@ func findValidUTF8End(data []byte) int {
 	}
 
 	return len(data)
+}
+
+// cleanEnv returns os.Environ() without variables that prevent Claude Code from starting.
+func cleanEnv() []string {
+	env := os.Environ()
+	result := make([]string, 0, len(env))
+	for _, e := range env {
+		if strings.HasPrefix(e, "CLAUDECODE=") {
+			continue
+		}
+		result = append(result, e)
+	}
+	return result
 }

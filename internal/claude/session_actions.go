@@ -10,6 +10,7 @@ import (
 	"time"
 
 	core "github.com/pink-tools/pink-core"
+	"pink-agent/internal/platform"
 )
 
 const initSessionPrompt = `You are a new Pink Agent session.
@@ -44,7 +45,9 @@ func runClaude(args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	command, prefixArgs := platform.ClaudeExecutable()
+	cmd := exec.CommandContext(ctx, command, append(prefixArgs, args...)...)
+	cmd.Env = cleanEnv()
 	cmd.Dir = core.BaseDir()
 	out, err := cmd.Output()
 	if err != nil {
