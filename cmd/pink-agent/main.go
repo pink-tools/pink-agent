@@ -58,7 +58,7 @@ func main() {
 	dataDir := core.DataDir(serviceName)
 	core.LoadEnv(serviceName)
 
-	core.Run(core.Config{
+	cfg := core.Config{
 		Name:    serviceName,
 		Version: version,
 		Usage: fmt.Sprintf(`pink-agent v%s - Telegram bot for Claude Code
@@ -258,7 +258,9 @@ Store flags:
 				return "UNKNOWN"
 			}
 		},
-	}, func(ctx context.Context) error {
+	}
+	core.HandleActions(&cfg, nil, nil)
+	core.Run(cfg, func(ctx context.Context) error {
 		return runDaemon(ctx, dataDir)
 	})
 }
