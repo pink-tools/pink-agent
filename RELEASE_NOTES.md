@@ -1,6 +1,6 @@
 # pink-agent
 
-Remote terminal control via Telegram with real-time WebSocket streaming.
+Telegram bot that runs Claude Code sessions in forum topics.
 
 ## Binaries
 
@@ -10,13 +10,12 @@ Remote terminal control via Telegram with real-time WebSocket streaming.
 
 ## Features
 
-- Telegram Mini App for terminal interface
-- Cloudflare tunnel integration
+- Telegram Forum Mode — each topic is a project with its own Claude session
 - Voice input via pink-transcriber
-- Project and session management
-- File store per project
+- Session compaction when context fills up
+- Per-project file store
 
 ## Requirements
 
-- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+- [claude](https://docs.anthropic.com/en/docs/claude-code) CLI
 - [pink-transcriber](https://github.com/pink-tools/pink-transcriber) (optional, for voice)
