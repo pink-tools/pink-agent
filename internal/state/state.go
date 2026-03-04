@@ -307,15 +307,16 @@ func migrateOldFormat(dataDir string, m *Manager) []string {
 	var old struct {
 		ActiveProject string `json:"activeProject"`
 		Projects      []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
+			ID            string `json:"id"`
+			Name          string `json:"name"`
+			ActiveSession string `json:"activeSession"`
 		} `json:"projects"`
 	}
 	if err := json.Unmarshal(data, &old); err != nil || old.ActiveProject == "" {
 		return nil // Not old format
 	}
 
-	// Collect projects that need forum topics
+	// Collect projects that need forum topics, preserve active sessions
 	var orphaned []string
 	for _, op := range old.Projects {
 		if op.ID == "" {
@@ -324,6 +325,9 @@ func migrateOldFormat(dataDir string, m *Manager) []string {
 		p := m.GetProject(op.ID)
 		if p == nil || p.ThreadID != 0 {
 			continue
+		}
+		if op.ActiveSession != "" {
+			m.SetProjectSession(op.ID, op.ActiveSession)
 		}
 		orphaned = append(orphaned, op.ID)
 	}

@@ -347,6 +347,11 @@ func (b *Bot) sendToClaude(ctx context.Context, threadID int, text string) {
 			SendToThread(b.api, b.chatID, threadID, "Failed to start Claude: "+err.Error(), "", nil)
 			return
 		}
+		// Fresh session — inject project context
+		if sessionID == "" {
+			initPrompt := buildInitPrompt(project.ID, b.state, b.store)
+			b.claude.Send(threadID, initPrompt)
+		}
 	}
 
 	if err := b.claude.Send(threadID, text); err != nil {
