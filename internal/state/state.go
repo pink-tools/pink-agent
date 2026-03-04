@@ -3,6 +3,7 @@ package state
 import (
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -310,14 +311,19 @@ func migrateOldFormat(dataDir string, m *Manager) []string {
 			ID            string `json:"id"`
 			Name          string `json:"name"`
 			ActiveSession string `json:"activeSession"`
+			Sessions      []struct {
+				ClaudeID string `json:"claudeId"`
+				Name     string `json:"name"`
+			} `json:"sessions"`
 		} `json:"projects"`
 	}
 	if err := json.Unmarshal(data, &old); err != nil || old.ActiveProject == "" {
 		return nil // Not old format
 	}
 
-	// Collect projects that need forum topics, preserve active sessions
+	storeDir := filepath.Join(dataDir, "store")
 	var orphaned []string
+
 	for _, op := range old.Projects {
 		if op.ID == "" {
 			continue
@@ -326,15 +332,69 @@ func migrateOldFormat(dataDir string, m *Manager) []string {
 		if p == nil || p.ThreadID != 0 {
 			continue
 		}
-		if op.ActiveSession != "" {
-			m.SetProjectSession(op.ID, op.ActiveSession)
+
+		if len(op.Sessions) == 0 {
+			orphaned = append(orphaned, op.ID)
+			continue
 		}
+
+		// Active session keeps the original project
+		keepIdx := 0
+		for i, sess := range op.Sessions {
+			if sess.ClaudeID == op.ActiveSession {
+				keepIdx = i
+				break
+			}
+		}
+		m.SetProjectSession(op.ID, op.Sessions[keepIdx].ClaudeID)
 		orphaned = append(orphaned, op.ID)
+
+		// Create new projects for remaining sessions
+		for i, sess := range op.Sessions {
+			if i == keepIdx {
+				continue
+			}
+			name := op.Name
+			if sess.Name != "" {
+				name = op.Name + " — " + sess.Name
+			}
+			newID, err := m.CreateProject(name)
+			if err != nil {
+				continue
+			}
+			m.SetProjectSession(newID, sess.ClaudeID)
+			copyStoreFiles(storeDir, op.ID, newID)
+			orphaned = append(orphaned, newID)
+		}
 	}
 
 	// Re-save in new format (drops activeProject, sessions, cols, rows)
 	m.storage.Save(m.State())
 
 	return orphaned
+}
+
+func copyStoreFiles(storeDir, srcProjectID, dstProjectID string) {
+	srcDir := filepath.Join(storeDir, srcProjectID)
+	dstDir := filepath.Join(storeDir, dstProjectID)
+
+	if _, err := os.Stat(srcDir); err != nil {
+		return
+	}
+
+	filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		relPath, _ := filepath.Rel(srcDir, path)
+		dstPath := filepath.Join(dstDir, relPath)
+		os.MkdirAll(filepath.Dir(dstPath), 0755)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		os.WriteFile(dstPath, data, 0644)
+		return nil
+	})
 }
 
