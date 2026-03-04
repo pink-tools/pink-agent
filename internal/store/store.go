@@ -1,4 +1,4 @@
-package projects
+package store
 
 import (
 	"errors"
@@ -10,18 +10,16 @@ import (
 
 var ErrPathTraversal = errors.New("path escapes store directory")
 
-// FileInfo represents a file in the project store
 type FileInfo struct {
 	Name string `json:"name"`
 	Size int64  `json:"size"`
 }
 
-// FileStore handles per-project file storage
 type FileStore struct {
 	basePath string
 }
 
-func NewFileStore(basePath string) *FileStore {
+func New(basePath string) *FileStore {
 	return &FileStore{basePath: basePath}
 }
 
@@ -96,7 +94,14 @@ func (s *FileStore) Delete(projectID, path string) error {
 	return os.Remove(fullPath)
 }
 
-func (s *FileStore) InitProjectContext(projectID string) error {
+func (s *FileStore) InitProject(projectID string) error {
+	fullPath, err := s.safePath(projectID, "PROJECT.md")
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(fullPath); err == nil {
+		return nil // already exists
+	}
 	return s.Add(projectID, "PROJECT.md", []byte("(empty)\n"))
 }
 

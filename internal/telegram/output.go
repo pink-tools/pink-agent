@@ -1,0 +1,501 @@
+package telegram
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
+	"pink-agent/internal/claude"
+	"pink-agent/internal/render"
+)
+
+const (
+	maxMessageLen = 4096
+	editInterval  = 2 * time.Second
+)
+
+// TopicOutput tracks the streaming output state for one forum topic.
+type TopicOutput struct {
+	threadID     int
+	currentMsgID int       // content message being edited
+	thinkingMsg  int       // thinking indicator/content message
+	textBuffer   string    // accumulated text for current content block
+	blockType    string    // current content block type: "text", "thinking", "tool_use"
+	toolName     string    // tool name from content_block_start
+	toolInput    string    // accumulated tool input JSON
+	lastEditTime time.Time
+	editTimer    *time.Timer
+
+	thinkingBuffer   string // accumulated thinking text
+	lastInputTokens  int    // from latest message_delta (input + cache)
+	lastOutputTokens int    // from latest message_delta
+	contextWindow    int    // from result.modelUsage
+	userMsgID        int    // user's message ID for clearing reaction
+	lastTextMsgID    int    // last rendered text message (for context prepend)
+	lastTextContent  string // its content
+	lastTextMode     string // parse mode ("HTML" or "")
+}
+
+// OutputManager manages streaming output for all topics.
+type OutputManager struct {
+	api    *tgbotapi.BotAPI
+	chatID int64
+	topics map[int]*TopicOutput
+	mu     sync.Mutex
+}
+
+func NewOutputManager(api *tgbotapi.BotAPI, chatID int64) *OutputManager {
+	return &OutputManager{
+		api:    api,
+		chatID: chatID,
+		topics: make(map[int]*TopicOutput),
+	}
+}
+
+// HandleEvent processes a claude output event for a topic.
+func (om *OutputManager) HandleEvent(threadID int, ev claude.OutputEvent) {
+	// Unwrap stream_event → inner event
+	if ev.Type == "stream_event" {
+		var wrapper struct {
+			Event json.RawMessage `json:"event"`
+		}
+		if err := json.Unmarshal(ev.Raw, &wrapper); err != nil || wrapper.Event == nil {
+			return
+		}
+		inner, err := claude.ParseEvent(wrapper.Event)
+		if err != nil {
+			return
+		}
+		ev = inner
+	}
+
+	om.mu.Lock()
+	defer om.mu.Unlock()
+
+	topic := om.getOrCreate(threadID)
+
+	switch ev.Type {
+	case "content_block_start":
+		var block struct {
+			ContentBlock struct {
+				Type  string          `json:"type"`
+				Name  string          `json:"name,omitempty"`
+				Input json.RawMessage `json:"input,omitempty"`
+			} `json:"content_block"`
+		}
+		json.Unmarshal(ev.Raw, &block)
+		topic.blockType = block.ContentBlock.Type
+		topic.toolName = block.ContentBlock.Name
+
+		switch block.ContentBlock.Type {
+		case "thinking":
+			topic.thinkingBuffer = ""
+		case "text":
+			topic.textBuffer = ""
+		case "tool_use":
+			om.flushText(topic)
+			topic.toolInput = ""
+		}
+
+	case "content_block_delta":
+		var block struct {
+			Delta struct {
+				Type        string `json:"type"`
+				Text        string `json:"text,omitempty"`
+				Thinking    string `json:"thinking,omitempty"`
+				PartialJSON string `json:"partial_json,omitempty"`
+			} `json:"delta"`
+		}
+		json.Unmarshal(ev.Raw, &block)
+
+		switch block.Delta.Type {
+		case "text_delta":
+			if topic.blockType == "text" {
+				topic.textBuffer += block.Delta.Text
+				om.scheduleEdit(topic)
+			}
+		case "thinking_delta":
+			topic.thinkingBuffer += block.Delta.Thinking
+		case "input_json_delta":
+			topic.toolInput += block.Delta.PartialJSON
+		}
+
+	case "content_block_stop":
+		switch topic.blockType {
+		case "tool_use":
+			om.renderToolFromState(topic)
+		case "text":
+			if topic.textBuffer != "" {
+				om.renderFinalText(topic)
+			}
+		case "thinking":
+			om.renderThinking(topic)
+		}
+		topic.blockType = ""
+
+	case "message_start":
+		// No action needed — /stop command handles interruption
+
+	case "message_delta":
+		var msg struct {
+			Usage struct {
+				InputTokens              int `json:"input_tokens"`
+				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+				OutputTokens             int `json:"output_tokens"`
+			} `json:"usage"`
+		}
+		json.Unmarshal(ev.Raw, &msg)
+		u := msg.Usage
+		topic.lastInputTokens = u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+		topic.lastOutputTokens = u.OutputTokens
+
+	case "result":
+		om.flushText(topic)
+
+		var res struct {
+			IsError    bool              `json:"is_error"`
+			Result     string            `json:"result"`
+			ModelUsage map[string]struct {
+				ContextWindow int `json:"contextWindow"`
+			} `json:"modelUsage"`
+		}
+		json.Unmarshal(ev.Raw, &res)
+
+		for _, mu := range res.ModelUsage {
+			topic.contextWindow = mu.ContextWindow
+			break
+		}
+
+		if res.IsError {
+			text := fmt.Sprintf("❌ %s", res.Result)
+			SendToThread(om.api, om.chatID, topic.threadID, text, "", nil)
+		}
+
+		om.prependContext(topic)
+		om.clearReaction(topic)
+
+	case "user":
+		om.handleToolResult(topic, ev)
+
+	case "assistant":
+		// With --include-partial-messages, streaming events handle output.
+		// Ignore complete assistant messages to avoid duplication.
+	}
+}
+
+// FlushAndInterrupt flushes partial output, clears reaction, and sends "Interrupted".
+func (om *OutputManager) FlushAndInterrupt(threadID int) {
+	om.mu.Lock()
+	defer om.mu.Unlock()
+
+	topic, ok := om.topics[threadID]
+	if !ok {
+		return
+	}
+
+	om.flushText(topic)
+	om.clearReaction(topic)
+
+	SendToThread(om.api, om.chatID, threadID, "Interrupted.", "", nil)
+}
+
+// Cleanup removes all state for a topic.
+func (om *OutputManager) Cleanup(threadID int) {
+	om.mu.Lock()
+	defer om.mu.Unlock()
+
+	if topic, ok := om.topics[threadID]; ok {
+		if topic.editTimer != nil {
+			topic.editTimer.Stop()
+		}
+		delete(om.topics, threadID)
+	}
+}
+
+// --- Internal ---
+
+func (om *OutputManager) getOrCreate(threadID int) *TopicOutput {
+	topic, ok := om.topics[threadID]
+	if !ok {
+		topic = &TopicOutput{threadID: threadID}
+		om.topics[threadID] = topic
+	}
+	return topic
+}
+
+// SetUserMessage stores the user's message ID for reaction clearing on result.
+func (om *OutputManager) SetUserMessage(threadID, msgID int) {
+	om.mu.Lock()
+	defer om.mu.Unlock()
+	topic := om.getOrCreate(threadID)
+	topic.userMsgID = msgID
+}
+
+func (om *OutputManager) renderThinking(topic *TopicOutput) {
+	if topic.thinkingBuffer == "" {
+		return
+	}
+
+	text := topic.thinkingBuffer
+	if len(text) > 3800 {
+		text = text[:3800] + "..."
+	}
+
+	html := fmt.Sprintf("<blockquote expandable>\U0001f4ad <i>%s</i></blockquote>", escapeHTMLStr(text))
+	SendToThread(om.api, om.chatID, topic.threadID, html, "HTML", nil)
+
+	topic.thinkingBuffer = ""
+}
+
+func (om *OutputManager) handleToolResult(topic *TopicOutput, ev claude.OutputEvent) {
+	var msg struct {
+		Message struct {
+			Content []struct {
+				IsError bool   `json:"is_error"`
+				Content string `json:"content"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(ev.Raw, &msg); err != nil {
+		return
+	}
+
+	for _, c := range msg.Message.Content {
+		if c.IsError && c.Content != "" {
+			errorText := c.Content
+			if len(errorText) > 500 {
+				errorText = errorText[:500] + "..."
+			}
+			text := fmt.Sprintf("❌ <code>%s</code>", escapeHTMLStr(errorText))
+			SendToThread(om.api, om.chatID, topic.threadID, text, "HTML", nil)
+			return
+		}
+	}
+}
+
+func (om *OutputManager) prependContext(topic *TopicOutput) {
+	total := topic.lastInputTokens + topic.lastOutputTokens
+	window := topic.contextWindow
+	if window == 0 {
+		window = 200000
+	}
+	if total == 0 {
+		return
+	}
+
+	ctx := fmt.Sprintf("<i>%d / %d</i>", total, window)
+
+	if topic.lastTextMsgID != 0 && topic.lastTextContent != "" {
+		content := topic.lastTextContent
+		if topic.lastTextMode != "HTML" {
+			content = escapeHTMLStr(content)
+		}
+		newContent := ctx + "\n" + content
+		EditMessage(om.api, om.chatID, topic.lastTextMsgID, newContent, "HTML", nil)
+	} else {
+		SendToThread(om.api, om.chatID, topic.threadID, ctx, "HTML", nil)
+	}
+
+	topic.lastTextMsgID = 0
+	topic.lastTextContent = ""
+	topic.lastTextMode = ""
+}
+
+func (om *OutputManager) clearReaction(topic *TopicOutput) {
+	if topic.userMsgID != 0 {
+		SetReaction(om.api, om.chatID, topic.userMsgID, "")
+		topic.userMsgID = 0
+	}
+}
+
+func (om *OutputManager) scheduleEdit(topic *TopicOutput) {
+	if topic.editTimer != nil {
+		return
+	}
+
+	if time.Since(topic.lastEditTime) >= editInterval {
+		om.doEdit(topic)
+		return
+	}
+
+	topic.editTimer = time.AfterFunc(editInterval, func() {
+		om.mu.Lock()
+		defer om.mu.Unlock()
+		topic.editTimer = nil
+		om.doEdit(topic)
+	})
+}
+
+func (om *OutputManager) doEdit(topic *TopicOutput) {
+	if topic.textBuffer == "" {
+		return
+	}
+
+	text := topic.textBuffer
+	if len(text) > maxMessageLen-100 {
+		om.splitMessage(topic, text)
+		return
+	}
+
+	topic.lastEditTime = time.Now()
+
+	if topic.currentMsgID == 0 {
+		msgID, err := SendToThread(om.api, om.chatID, topic.threadID, text, "", nil)
+		if err == nil {
+			topic.currentMsgID = msgID
+		}
+	} else {
+		EditMessage(om.api, om.chatID, topic.currentMsgID, text, "", nil)
+	}
+}
+
+func (om *OutputManager) renderFinalText(topic *TopicOutput) {
+	if topic.editTimer != nil {
+		topic.editTimer.Stop()
+		topic.editTimer = nil
+	}
+
+	text := topic.textBuffer
+	topic.textBuffer = ""
+
+	if text == "" {
+		return
+	}
+
+	html := render.Telegram(text)
+	chunks := splitHTML(html, maxMessageLen)
+
+	for i, chunk := range chunks {
+		if i == 0 && topic.currentMsgID != 0 {
+			err := EditMessage(om.api, om.chatID, topic.currentMsgID, chunk, "HTML", nil)
+			if err != nil {
+				EditMessage(om.api, om.chatID, topic.currentMsgID, text, "", nil)
+				topic.lastTextMsgID = topic.currentMsgID
+				topic.lastTextContent = text
+				topic.lastTextMode = ""
+			} else {
+				topic.lastTextMsgID = topic.currentMsgID
+				topic.lastTextContent = chunk
+				topic.lastTextMode = "HTML"
+			}
+		} else {
+			msgID, _ := SendToThread(om.api, om.chatID, topic.threadID, chunk, "HTML", nil)
+			if i == 0 {
+				topic.currentMsgID = msgID
+			}
+			topic.lastTextMsgID = msgID
+			topic.lastTextContent = chunk
+			topic.lastTextMode = "HTML"
+		}
+	}
+
+	topic.currentMsgID = 0
+}
+
+func (om *OutputManager) flushText(topic *TopicOutput) {
+	if topic.editTimer != nil {
+		topic.editTimer.Stop()
+		topic.editTimer = nil
+	}
+
+	if topic.textBuffer != "" {
+		om.renderFinalText(topic)
+	}
+}
+
+func (om *OutputManager) renderToolFromState(topic *TopicOutput) {
+	name := topic.toolName
+
+	var inputStr string
+	if topic.toolInput != "" {
+		var input map[string]any
+		if err := json.Unmarshal([]byte(topic.toolInput), &input); err == nil {
+			if cmd, ok := input["command"].(string); ok {
+				inputStr = cmd
+			} else {
+				data, _ := json.Marshal(input)
+				inputStr = string(data)
+			}
+		} else {
+			inputStr = topic.toolInput
+		}
+	}
+
+	if len(inputStr) > 500 {
+		inputStr = inputStr[:500] + "..."
+	}
+
+	var text string
+	if inputStr != "" {
+		text = fmt.Sprintf("<blockquote expandable>\u25b6 <b>%s</b>\n<code>%s</code></blockquote>",
+			escapeHTMLStr(name), escapeHTMLStr(inputStr))
+	} else {
+		text = fmt.Sprintf("<blockquote expandable>\u25b6 <b>%s</b></blockquote>", escapeHTMLStr(name))
+	}
+
+	SendToThread(om.api, om.chatID, topic.threadID, text, "HTML", nil)
+	topic.currentMsgID = 0
+	topic.toolName = ""
+	topic.toolInput = ""
+}
+
+func (om *OutputManager) splitMessage(topic *TopicOutput, text string) {
+	splitIdx := findSplitPoint(text, maxMessageLen-200)
+
+	first := text[:splitIdx]
+	rest := text[splitIdx:]
+
+	if topic.currentMsgID != 0 {
+		EditMessage(om.api, om.chatID, topic.currentMsgID, first, "", nil)
+	} else {
+		SendToThread(om.api, om.chatID, topic.threadID, first, "", nil)
+	}
+
+	msgID, _ := SendToThread(om.api, om.chatID, topic.threadID, rest, "", nil)
+	topic.currentMsgID = msgID
+	topic.textBuffer = rest
+	topic.lastEditTime = time.Now()
+}
+
+func splitHTML(html string, maxLen int) []string {
+	if len(html) <= maxLen {
+		return []string{html}
+	}
+
+	var chunks []string
+	remaining := html
+
+	for len(remaining) > 0 {
+		if len(remaining) <= maxLen {
+			chunks = append(chunks, remaining)
+			break
+		}
+
+		splitIdx := findSplitPoint(remaining, maxLen)
+		chunks = append(chunks, remaining[:splitIdx])
+		remaining = remaining[splitIdx:]
+	}
+
+	return chunks
+}
+
+func findSplitPoint(text string, maxLen int) int {
+	if len(text) <= maxLen {
+		return len(text)
+	}
+
+	if idx := strings.LastIndex(text[:maxLen], "\n\n"); idx > maxLen/2 {
+		return idx + 2
+	}
+
+	if idx := strings.LastIndex(text[:maxLen], "\n"); idx > maxLen/2 {
+		return idx + 1
+	}
+
+	return maxLen
+}

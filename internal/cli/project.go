@@ -8,9 +8,20 @@ import (
 	"github.com/pink-tools/pink-core"
 )
 
+type cliState struct {
+	Projects []cliProject `json:"projects"`
+}
+
+type cliProject struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	ThreadID  int    `json:"threadId,omitempty"`
+	SessionID string `json:"sessionId,omitempty"`
+}
+
 func HandleProject(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: pink-agent project <list>")
+		return fmt.Errorf("usage: pink-agent project list")
 	}
 
 	switch args[0] {
@@ -31,7 +42,7 @@ func projectList() error {
 		return fmt.Errorf("%s", strings.TrimPrefix(response, "ERROR:"))
 	}
 
-	var state sessionState
+	var state cliState
 	if err := json.Unmarshal([]byte(response), &state); err != nil {
 		return fmt.Errorf("parse state: %w", err)
 	}
@@ -42,12 +53,14 @@ func projectList() error {
 	}
 
 	for _, p := range state.Projects {
-		marker := "  "
-		if p.ID == state.ActiveProject {
-			marker = "* "
+		line := fmt.Sprintf("  %s (%s)", p.Name, p.ID[:8])
+		if p.ThreadID != 0 {
+			line += fmt.Sprintf(" thread:%d", p.ThreadID)
 		}
-		sessionCount := len(p.Sessions)
-		fmt.Printf("%s%s (%d sessions)\n", marker, p.Name, sessionCount)
+		if p.SessionID != "" {
+			line += fmt.Sprintf(" session:%s", p.SessionID[:8])
+		}
+		fmt.Println(line)
 	}
 
 	return nil

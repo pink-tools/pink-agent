@@ -5,17 +5,13 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
 
 type Config struct {
 	TelegramBotToken string
-	TelegramUserID   int64
-	TunnelName       string
-	TunnelID         string
-	Port             int
+	TelegramGroupID  int64
 }
 
 func Load(envPath string) (*Config, error) {
@@ -26,25 +22,14 @@ func Load(envPath string) (*Config, error) {
 
 	cfg := &Config{
 		TelegramBotToken: env["TELEGRAM_BOT_TOKEN"],
-		TunnelName:       env["TUNNEL_NAME"],
-		TunnelID:         env["TUNNEL_ID"],
-		Port:             7466,
 	}
 
-	if uid := env["TELEGRAM_USER_ID"]; uid != "" {
-		id, err := strconv.ParseInt(uid, 10, 64)
+	if gid := env["TELEGRAM_GROUP_ID"]; gid != "" {
+		id, err := strconv.ParseInt(gid, 10, 64)
 		if err != nil {
-			return nil, errors.New("invalid TELEGRAM_USER_ID")
+			return nil, errors.New("invalid TELEGRAM_GROUP_ID")
 		}
-		cfg.TelegramUserID = id
-	}
-
-	if port := env["PORT"]; port != "" {
-		p, err := strconv.Atoi(port)
-		if err != nil {
-			return nil, errors.New("invalid PORT")
-		}
-		cfg.Port = p
+		cfg.TelegramGroupID = id
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -58,14 +43,8 @@ func (c *Config) validate() error {
 	if c.TelegramBotToken == "" {
 		return errors.New("TELEGRAM_BOT_TOKEN required")
 	}
-	if c.TelegramUserID == 0 {
-		return errors.New("TELEGRAM_USER_ID required")
-	}
-	if c.TunnelName == "" {
-		return errors.New("TUNNEL_NAME required")
-	}
-	if c.TunnelID == "" {
-		return errors.New("TUNNEL_ID required")
+	if c.TelegramGroupID == 0 {
+		return errors.New("TELEGRAM_GROUP_ID required")
 	}
 	return nil
 }
@@ -96,16 +75,5 @@ func CheckDeps() error {
 	if _, err := exec.LookPath("claude"); err != nil {
 		return errors.New("claude not found in PATH")
 	}
-	if _, err := exec.LookPath("cloudflared"); err != nil {
-		return errors.New("cloudflared not found in PATH")
-	}
 	return nil
-}
-
-// AgentWorkDir returns parent of home directory.
-// Agent runs from here so both <parent>/.claude (agent) and ~/.claude (user) load.
-// macOS: /Users, Windows: C:\Users, Linux: /home
-func AgentWorkDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Dir(home)
 }

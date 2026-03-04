@@ -1,106 +1,147 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/pink-tools/pink-core"
-	"pink-agent/internal/projects"
+
+	"pink-agent/internal/store"
 )
 
 func HandleStore(args []string) error {
-	dataDir := core.DataDir(serviceName)
-	storePath := filepath.Join(dataDir, "store")
-	statePath := filepath.Join(dataDir, "state.json")
-
-	storage := projects.NewFileStorage(statePath)
-	stateManager, err := projects.NewManager(storage, nil)
-	if err != nil {
-		return fmt.Errorf("load state: %w", err)
-	}
-	defer stateManager.Close()
-
-	fileStore := projects.NewFileStore(storePath)
-
-	// Parse flags
-	projectID := ""
-	force := false
-	i := 0
-	for i < len(args) {
-		if args[i] == "-p" && i+1 < len(args) {
-			projectName := args[i+1]
-			for _, p := range stateManager.State().Projects {
-				if p.Name == projectName {
-					projectID = p.ID
-					break
-				}
-			}
-			if projectID == "" {
-				return fmt.Errorf("project not found: %s", projectName)
-			}
-			args = append(args[:i], args[i+2:]...)
-		} else if args[i] == "--force" || args[i] == "-f" {
-			force = true
-			args = append(args[:i], args[i+1:]...)
-		} else {
-			i++
-		}
-	}
-
-	// Use active project if not specified
-	if projectID == "" {
-		project := stateManager.State().GetActiveProject()
-		if project == nil {
-			return fmt.Errorf("no active project")
-		}
-		projectID = project.ID
-	}
-
 	if len(args) == 0 {
-		return fmt.Errorf("usage: pink-agent store [list|get|add] ...")
+		return fmt.Errorf("usage: pink-agent store list|get|add|delete [args]")
 	}
+
+	// Parse -p flag for project name lookup
+	var projectName string
+	var filtered []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-p" && i+1 < len(args) {
+			projectName = args[i+1]
+			i++
+			continue
+		}
+		filtered = append(filtered, args[i])
+	}
+	args = filtered
+
+	projectID, err := resolveProjectID(projectName)
+	if err != nil {
+		return err
+	}
+
+	fs := store.New(filepath.Join(core.DataDir(serviceName), "store"))
 
 	switch args[0] {
 	case "list":
-		files, err := fileStore.List(projectID)
-		if err != nil {
-			return err
-		}
-		for _, f := range files {
-			fmt.Println(f.Name)
-		}
-
+		return storeList(fs, projectID)
 	case "get":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: pink-agent store get <path>")
 		}
-		content, err := fileStore.Get(projectID, args[1])
-		if err != nil {
-			return err
-		}
-		fmt.Print(string(content))
-
+		return storeGet(fs, projectID, args[1])
 	case "add":
-		if len(args) < 3 {
-			return fmt.Errorf("usage: pink-agent store add <path> <content>")
+		return storeAdd(fs, projectID, args[1:])
+	case "delete":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: pink-agent store delete <path>")
 		}
-		path := args[1]
-		// Check if file exists
-		if !force {
-			if _, err := fileStore.Get(projectID, path); err == nil {
-				return fmt.Errorf("file already exists: %s (use --force to overwrite)", path)
-			}
-		}
-		if err := fileStore.Add(projectID, path, []byte(args[2])); err != nil {
-			return err
-		}
-		// Notify UI
-		core.SendCommand(serviceName, "refreshStore")
-		return nil
-
+		return fs.Delete(projectID, args[1])
 	default:
 		return fmt.Errorf("unknown store command: %s", args[0])
 	}
+}
 
+func resolveProjectID(name string) (string, error) {
+	// Env var first
+	if id := os.Getenv("PINK_PROJECT_ID"); id != "" {
+		return id, nil
+	}
+
+	// Fallback: -p flag with project name lookup
+	if name == "" {
+		return "", fmt.Errorf("PINK_PROJECT_ID not set and no -p flag provided")
+	}
+
+	response, err := core.SendCommand(serviceName, "getState")
+	if err != nil {
+		return "", fmt.Errorf("agent not running")
+	}
+	if strings.HasPrefix(response, "ERROR:") {
+		return "", fmt.Errorf("%s", strings.TrimPrefix(response, "ERROR:"))
+	}
+
+	var state cliState
+	if err := json.Unmarshal([]byte(response), &state); err != nil {
+		return "", fmt.Errorf("parse state: %w", err)
+	}
+
+	nameLower := strings.ToLower(name)
+	for _, p := range state.Projects {
+		if strings.ToLower(p.Name) == nameLower {
+			return p.ID, nil
+		}
+	}
+	return "", fmt.Errorf("project not found: %s", name)
+}
+
+func storeList(fs *store.FileStore, projectID string) error {
+	files, err := fs.List(projectID)
+	if err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		fmt.Println("No files")
+		return nil
+	}
+	for _, f := range files {
+		fmt.Printf("  %s (%d bytes)\n", f.Name, f.Size)
+	}
 	return nil
+}
+
+func storeGet(fs *store.FileStore, projectID, path string) error {
+	content, err := fs.Get(projectID, path)
+	if err != nil {
+		return err
+	}
+	fmt.Print(string(content))
+	return nil
+}
+
+func storeAdd(fs *store.FileStore, projectID string, args []string) error {
+	// Parse --force flag
+	var force bool
+	var filtered []string
+	for _, a := range args {
+		if a == "--force" {
+			force = true
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+
+	if len(filtered) < 2 {
+		return fmt.Errorf("usage: pink-agent store add [--force] <path> <content>")
+	}
+
+	path := filtered[0]
+	content := strings.Join(filtered[1:], " ")
+
+	// Check if file exists (unless --force)
+	if !force {
+		if existing, err := fs.Get(projectID, path); err == nil && len(existing) > 0 {
+			existingStr := strings.TrimSpace(string(existing))
+			if existingStr != "" && existingStr != "(empty)" {
+				return fmt.Errorf("file already exists: %s (use --force to overwrite)", path)
+			}
+		}
+	}
+
+	return fs.Add(projectID, path, []byte(content))
 }
