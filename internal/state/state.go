@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 
 	"github.com/google/uuid"
@@ -258,7 +257,6 @@ func (m *Manager) ClearProjectThread(id string) error {
 func Migrate(dataDir string, m *Manager) []string {
 	orphaned := migrateOldFormat(dataDir, m)
 	migrateTopics(dataDir, m)
-	migrateContext(dataDir, m)
 	return orphaned
 }
 
@@ -336,61 +334,3 @@ func migrateOldFormat(dataDir string, m *Manager) []string {
 	return orphaned
 }
 
-// migrateContext moves Context field from state.json projects into store PROJECT.md files.
-func migrateContext(dataDir string, m *Manager) {
-	path := filepath.Join(dataDir, "state.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-
-	// Parse with Context field to detect legacy data
-	var old struct {
-		Projects []struct {
-			ID      string `json:"id"`
-			Context string `json:"context"`
-		} `json:"projects"`
-	}
-	if err := json.Unmarshal(data, &old); err != nil {
-		return
-	}
-
-	storeDir := filepath.Join(dataDir, "store")
-	changed := false
-
-	for _, op := range old.Projects {
-		if op.ID == "" || op.Context == "" {
-			continue
-		}
-		content := strings.TrimSpace(op.Context)
-		if content == "" || content == "(empty)" {
-			continue
-		}
-
-		// Only write if store PROJECT.md is empty/missing
-		mdPath := filepath.Join(storeDir, op.ID, "PROJECT.md")
-		existing, _ := os.ReadFile(mdPath)
-		existingStr := strings.TrimSpace(string(existing))
-		if existingStr != "" && existingStr != "(empty)" {
-			continue
-		}
-
-		// Write context to store
-		dir := filepath.Join(storeDir, op.ID)
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			continue
-		}
-		if err := os.WriteFile(mdPath, []byte(content+"\n"), 0644); err != nil {
-			continue
-		}
-		changed = true
-	}
-
-	if !changed {
-		return
-	}
-
-	// Re-save state without Context field (already removed from struct, just re-save)
-	s := m.State()
-	m.storage.Save(s)
-}
