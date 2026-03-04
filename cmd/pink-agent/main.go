@@ -259,10 +259,59 @@ Store flags:
 			}
 		},
 	}
-	core.HandleActions(&cfg, nil, nil)
+	actions := []core.Action{
+		{Name: "install", Label: "Install", Desc: "Initial setup"},
+	}
+	handlers := map[string]core.ActionHandler{
+		"install": {Describe: describeInstall, Execute: executeInstall},
+	}
+	core.HandleActions(&cfg, actions, handlers)
 	core.Run(cfg, func(ctx context.Context) error {
 		return runDaemon(ctx, dataDir)
 	})
+}
+
+func describeInstall() core.FormSpec {
+	return core.FormSpec{
+		Title: "Pink Agent Setup",
+		Fields: []core.Field{
+			{Name: "TELEGRAM_BOT_TOKEN", Type: "text", Label: "Telegram Bot Token", Hint: "Get from @BotFather", Required: true},
+			{Name: "TELEGRAM_USER_ID", Type: "text", Label: "Telegram User ID", Hint: "Get from @userinfobot", Required: true},
+			{Name: "TUNNEL_NAME", Type: "text", Label: "Tunnel Name", Hint: "Cloudflare tunnel name", Required: true},
+			{Name: "TUNNEL_ID", Type: "text", Label: "Tunnel ID", Hint: "Cloudflare tunnel ID", Required: true},
+			{Name: "TUNNEL_CREDENTIALS", Type: "file", Label: "Tunnel Credentials", Hint: "JSON file from ~/.cloudflared/", Required: true, Extensions: []string{".json"}},
+		},
+	}
+}
+
+func executeInstall(values map[string]any) error {
+	// Copy credentials file to ~/.cloudflared/<tunnel-id>.json
+	credPath, _ := values["TUNNEL_CREDENTIALS"].(string)
+	tunnelID, _ := values["TUNNEL_ID"].(string)
+	if credPath != "" && tunnelID != "" {
+		homeDir, _ := os.UserHomeDir()
+		destDir := filepath.Join(homeDir, ".cloudflared")
+		if err := os.MkdirAll(destDir, 0700); err != nil {
+			return fmt.Errorf("create .cloudflared dir: %w", err)
+		}
+		data, err := os.ReadFile(credPath)
+		if err != nil {
+			return fmt.Errorf("read credentials file: %w", err)
+		}
+		dest := filepath.Join(destDir, tunnelID+".json")
+		if err := os.WriteFile(dest, data, 0600); err != nil {
+			return fmt.Errorf("write credentials file: %w", err)
+		}
+	}
+
+	env := make(map[string]string)
+	for k, v := range values {
+		if k == "TUNNEL_CREDENTIALS" {
+			continue
+		}
+		env[k] = fmt.Sprintf("%v", v)
+	}
+	return core.SaveEnv(serviceName, env)
 }
 
 func hasFlag(name string) bool {
