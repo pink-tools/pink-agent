@@ -151,6 +151,11 @@ func runDaemon(ctx context.Context, dataDir string) error {
 	// Migrate legacy formats
 	orphaned := state.Migrate(dataDir, stateMgr)
 
+	// Ensure all projects have store initialized
+	for _, p := range stateMgr.State().Projects {
+		fileStore.InitProject(p.ID)
+	}
+
 	// Initialize Claude process manager
 	mcpConfig := filepath.Join(dataDir, "mcp-config.json")
 	claudeMgr := claude.NewManager(mcpConfig)
