@@ -206,7 +206,7 @@ func runDaemon(ctx context.Context, dataDir string, d *atomic.Pointer[daemon]) e
 	fileStore := store.New(filepath.Join(dataDir, "store"))
 
 	// Migrate legacy formats
-	orphaned := state.Migrate(dataDir, stateMgr)
+	state.Migrate(dataDir, stateMgr)
 
 	// Ensure all projects have store initialized
 	for _, p := range stateMgr.State().Projects {
@@ -224,10 +224,8 @@ func runDaemon(ctx context.Context, dataDir string, d *atomic.Pointer[daemon]) e
 		return fmt.Errorf("create telegram bot: %w", err)
 	}
 
-	// Create forum topics for migrated projects
-	if len(orphaned) > 0 {
-		bot.MigrateProjects(ctx, orphaned)
-	}
+	// Create forum topics for projects without one (migration or previous failure)
+	bot.MigrateProjects(ctx)
 
 	d.Store(&daemon{bot: bot, state: stateMgr})
 

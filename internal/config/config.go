@@ -65,7 +65,11 @@ func parseEnvFile(path string) (map[string]string, error) {
 		}
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) == 2 {
-			env[parts[0]] = parts[1]
+			val := parts[1]
+			if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+				val = val[1 : len(val)-1]
+			}
+			env[parts[0]] = val
 		}
 	}
 	return env, scanner.Err()

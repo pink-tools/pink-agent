@@ -123,11 +123,10 @@ func NewBot(token string, chatID int64, stateMgr *state.Manager, claudeMgr *clau
 	return b, nil
 }
 
-// MigrateProjects creates forum topics for projects that don't have one (from old format migration).
-func (b *Bot) MigrateProjects(ctx context.Context, projectIDs []string) {
-	for _, id := range projectIDs {
-		p := b.state.GetProject(id)
-		if p == nil || p.ThreadID != 0 {
+// MigrateProjects creates forum topics for all projects that don't have one.
+func (b *Bot) MigrateProjects(ctx context.Context) {
+	for _, p := range b.state.State().Projects {
+		if p.ThreadID != 0 {
 			continue
 		}
 
@@ -138,8 +137,8 @@ func (b *Bot) MigrateProjects(ctx context.Context, projectIDs []string) {
 			continue
 		}
 
-		b.state.SetProjectThread(id, threadID)
-		b.store.InitProject(id)
+		b.state.SetProjectThread(p.ID, threadID)
+		b.store.InitProject(p.ID)
 
 		SendToThread(b.api, b.chatID, threadID, "🦄 Pink Agent activated and ready to work.", "", nil)
 		log.Info(ctx, "migrated project", log.Attr{K: "project", V: p.Name}, log.Attr{K: "threadId", V: threadID})
