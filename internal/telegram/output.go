@@ -27,6 +27,8 @@ type TopicOutput struct {
 	blockType    string    // current content block type: "text", "thinking", "tool_use"
 	toolName     string    // tool name from content_block_start
 	toolInput    string    // accumulated tool input JSON
+	toolMsgID    int       // tool use message ID (for appending result)
+	toolMsgHTML  string    // tool use message HTML (for editing)
 	lastEditTime time.Time
 	editTimer    *time.Timer
 
@@ -266,15 +268,39 @@ func (om *OutputManager) handleToolResult(topic *TopicOutput, ev claude.OutputEv
 	}
 
 	for _, c := range msg.Message.Content {
-		if c.IsError && c.Content != "" {
-			errorText := c.Content
-			if len(errorText) > 500 {
-				errorText = errorText[:500] + "..."
-			}
-			text := fmt.Sprintf("❌ <code>%s</code>", escapeHTMLStr(errorText))
-			SendToThread(om.api, om.chatID, topic.threadID, text, "HTML", nil)
-			return
+		if c.Content == "" {
+			continue
 		}
+
+		content := c.Content
+		if len(content) > 500 {
+			content = content[:500] + "..."
+		}
+
+		var prefix string
+		if c.IsError {
+			prefix = "❌"
+		} else {
+			prefix = "✓"
+		}
+
+		resultLine := fmt.Sprintf("\n%s <code>%s</code>", prefix, escapeHTMLStr(content))
+
+		if topic.toolMsgID != 0 && topic.toolMsgHTML != "" {
+			// Insert result before closing </blockquote>
+			base := strings.TrimSuffix(topic.toolMsgHTML, "</blockquote>")
+			newHTML := base + resultLine + "</blockquote>"
+			EditMessage(om.api, om.chatID, topic.toolMsgID, newHTML, "HTML", nil)
+		} else {
+			// Fallback: send as separate message
+			text := fmt.Sprintf("<blockquote expandable>%s <code>%s</code></blockquote>",
+				prefix, escapeHTMLStr(content))
+			SendToThread(om.api, om.chatID, topic.threadID, text, "HTML", nil)
+		}
+
+		topic.toolMsgID = 0
+		topic.toolMsgHTML = ""
+		return
 	}
 }
 
@@ -430,15 +456,17 @@ func (om *OutputManager) renderToolFromState(topic *TopicOutput) {
 		inputStr = inputStr[:500] + "..."
 	}
 
-	var text string
+	var html string
 	if inputStr != "" {
-		text = fmt.Sprintf("<blockquote expandable>\u25b6 <b>%s</b>\n<code>%s</code></blockquote>",
+		html = fmt.Sprintf("<blockquote expandable>\u25b6 <b>%s</b>\n<code>%s</code></blockquote>",
 			escapeHTMLStr(name), escapeHTMLStr(inputStr))
 	} else {
-		text = fmt.Sprintf("<blockquote expandable>\u25b6 <b>%s</b></blockquote>", escapeHTMLStr(name))
+		html = fmt.Sprintf("<blockquote expandable>\u25b6 <b>%s</b></blockquote>", escapeHTMLStr(name))
 	}
 
-	SendToThread(om.api, om.chatID, topic.threadID, text, "HTML", nil)
+	msgID, _ := SendToThread(om.api, om.chatID, topic.threadID, html, "HTML", nil)
+	topic.toolMsgID = msgID
+	topic.toolMsgHTML = html
 	topic.currentMsgID = 0
 	topic.toolName = ""
 	topic.toolInput = ""
