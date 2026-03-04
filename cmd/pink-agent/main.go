@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 
 	"github.com/pink-tools/pink-core"
 	"github.com/pink-tools/pink-core/log"
@@ -21,9 +23,16 @@ var version = "dev"
 
 const serviceName = "pink-agent"
 
+type daemon struct {
+	bot   *telegram.Bot
+	state *state.Manager
+}
+
 func main() {
 	dataDir := core.DataDir(serviceName)
 	core.LoadEnv(serviceName)
+
+	var d atomic.Pointer[daemon]
 
 	cfg := core.Config{
 		Name:    serviceName,
@@ -35,6 +44,8 @@ Usage:
   pink-agent stop                     Stop daemon
   pink-agent status                   Check if running
   pink-agent project list             List projects
+  pink-agent project create "Name" ["Prompt"]  Create project
+  pink-agent project delete [id-or-name]       Delete project
   pink-agent store list|get|add|delete Manage project files
   pink-agent send "text"              Send text to topic
   pink-agent send -f <file>           Send file to topic
@@ -64,7 +75,7 @@ Usage:
 				},
 			},
 			"project": {
-				Desc: "Project management (list)",
+				Desc: "Project management (list, create, delete)",
 				Run:  cli.HandleProject,
 			},
 			"store": {
@@ -77,8 +88,18 @@ Usage:
 			},
 		},
 		IPCHandler: func(cmd string) string {
-			switch cmd {
+			name, payload, _ := strings.Cut(cmd, ":")
+
+			switch name {
 			case "getState":
+				if dm := d.Load(); dm != nil {
+					data, err := json.Marshal(dm.state.State())
+					if err != nil {
+						return "ERROR:" + err.Error()
+					}
+					return string(data)
+				}
+				// Fallback: load from disk when daemon not ready
 				storage := state.NewStorage(filepath.Join(dataDir, "state.json"))
 				s, err := storage.Load()
 				if err != nil {
@@ -89,6 +110,42 @@ Usage:
 					return "ERROR:" + err.Error()
 				}
 				return string(data)
+
+			case "createProject":
+				dm := d.Load()
+				if dm == nil {
+					return "ERROR:daemon not ready"
+				}
+				var req struct {
+					Name   string `json:"name"`
+					Prompt string `json:"prompt"`
+				}
+				if err := json.Unmarshal([]byte(payload), &req); err != nil {
+					return "ERROR:" + err.Error()
+				}
+				result, err := dm.bot.CreateProject(req.Name, req.Prompt)
+				if err != nil {
+					return "ERROR:" + err.Error()
+				}
+				data, _ := json.Marshal(result)
+				return string(data)
+
+			case "deleteProject":
+				dm := d.Load()
+				if dm == nil {
+					return "ERROR:daemon not ready"
+				}
+				var req struct {
+					ID string `json:"id"`
+				}
+				if err := json.Unmarshal([]byte(payload), &req); err != nil {
+					return "ERROR:" + err.Error()
+				}
+				if err := dm.bot.DeleteProject(req.ID); err != nil {
+					return "ERROR:" + err.Error()
+				}
+				return "OK"
+
 			default:
 				return "UNKNOWN"
 			}
@@ -103,7 +160,7 @@ Usage:
 	}
 	core.HandleActions(&cfg, actions, handlers)
 	core.Run(cfg, func(ctx context.Context) error {
-		return runDaemon(ctx, dataDir)
+		return runDaemon(ctx, dataDir, &d)
 	})
 }
 
@@ -125,7 +182,7 @@ func executeInstall(values map[string]any) error {
 	return core.SaveEnv(serviceName, env)
 }
 
-func runDaemon(ctx context.Context, dataDir string) error {
+func runDaemon(ctx context.Context, dataDir string, d *atomic.Pointer[daemon]) error {
 	envPath := filepath.Join(dataDir, ".env")
 
 	cfg, err := config.Load(envPath)
@@ -171,6 +228,8 @@ func runDaemon(ctx context.Context, dataDir string) error {
 	if len(orphaned) > 0 {
 		bot.MigrateProjects(ctx, orphaned)
 	}
+
+	d.Store(&daemon{bot: bot, state: stateMgr})
 
 	log.Info(ctx, "ready")
 

@@ -388,6 +388,11 @@ func (b *Bot) spawnClaude(threadID int, sessionID string, extraEnv []string) err
 }
 
 func (b *Bot) handleTopicCreated(ctx context.Context, threadID int, name string) {
+	// Guard: skip if project already exists for this thread (CLI-created)
+	if b.state.GetProjectByThread(threadID) != nil {
+		return
+	}
+
 	// Create project and link to this thread
 	projectID, err := b.state.CreateProject(name)
 	if err != nil {
@@ -427,6 +432,64 @@ func (b *Bot) handleTopicClosed(ctx context.Context, threadID int) {
 	if p := b.state.GetProjectByThread(threadID); p != nil {
 		b.state.ClearProjectThread(p.ID)
 	}
+}
+
+// CreateProjectResult is the response for CLI project creation.
+type CreateProjectResult struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	ThreadID int    `json:"threadId"`
+}
+
+// CreateProject creates a forum topic, project, and Claude session.
+func (b *Bot) CreateProject(name, prompt string) (*CreateProjectResult, error) {
+	threadID, err := CreateForumTopic(b.api, b.chatID, name)
+	if err != nil {
+		return nil, fmt.Errorf("create topic: %w", err)
+	}
+
+	projectID, err := b.state.CreateProject(name)
+	if err != nil {
+		return nil, fmt.Errorf("create project: %w", err)
+	}
+	b.state.SetProjectThread(projectID, threadID)
+	b.store.InitProject(projectID)
+
+	if err := b.spawnClaude(threadID, "", nil); err != nil {
+		return nil, fmt.Errorf("spawn claude: %w", err)
+	}
+
+	SendToThread(b.api, b.chatID, threadID, "\U0001f984 Pink Agent activated and ready to work.", "", nil)
+
+	initPrompt := buildInitPrompt(projectID, b.state, b.store)
+	b.claude.Send(threadID, initPrompt)
+
+	if prompt != "" {
+		b.claude.Send(threadID, prompt)
+	}
+
+	return &CreateProjectResult{
+		ID:       projectID,
+		Name:     name,
+		ThreadID: threadID,
+	}, nil
+}
+
+// DeleteProject stops the session, removes the topic, store, and state.
+func (b *Bot) DeleteProject(projectID string) error {
+	p := b.state.GetProject(projectID)
+	if p == nil {
+		return state.ErrProjectNotFound
+	}
+
+	if p.ThreadID != 0 {
+		b.claude.Stop(p.ThreadID)
+		b.output.Cleanup(p.ThreadID)
+		DeleteForumTopic(b.api, b.chatID, p.ThreadID)
+	}
+
+	b.store.DeleteProject(projectID)
+	return b.state.DeleteProject(projectID)
 }
 
 const dmSetupText = `I only work in a Telegram group with Topics enabled.
