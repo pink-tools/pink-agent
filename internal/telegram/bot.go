@@ -368,8 +368,8 @@ func (b *Bot) restartSession(ctx context.Context, threadID int) {
 		return
 	}
 
-	initPrompt := buildInitPrompt(p.ID, b.state, b.store)
-	b.claude.Send(threadID, initPrompt)
+	prompt := buildRestartPrompt(p.ID, b.state, b.store)
+	b.claude.Send(threadID, prompt)
 
 	log.Info(ctx, "session restarted (context limit)", log.Attr{K: "project", V: p.Name})
 }
@@ -676,23 +676,46 @@ func (b *Bot) downloadFile(fileID, filename string) (string, error) {
 }
 
 func buildInitPrompt(projectID string, stateMgr *state.Manager, fs *store.FileStore) string {
+	claudeMd := filepath.Join(core.HomeDir(), "pink-tools", ".claude", "CLAUDE.md")
+
 	var parts []string
-	parts = append(parts, "You are a new Pink Agent session.")
+	parts = append(parts, "New Pink Agent session.")
 
 	if projectID != "" {
 		if p := stateMgr.GetProject(projectID); p != nil {
-			parts = append(parts, fmt.Sprintf("Project: %s", p.Name))
-		}
-
-		if ctx := readProjectContext(fs, projectID); ctx != "" {
-			parts = append(parts, fmt.Sprintf("\nPROJECT CONTEXT:\n%s", ctx))
+			parts = append(parts, fmt.Sprintf("Project: %s.", p.Name))
 		}
 	}
 
-	claudeMd := filepath.Join(core.HomeDir(), "pink-tools", ".claude", "CLAUDE.md")
-	parts = append(parts, fmt.Sprintf("\nYou ARE running via pink-agent. Read configuration: %s", claudeMd))
+	parts = append(parts, fmt.Sprintf("Read configuration: %s. Then wait for instructions.", claudeMd))
 
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, " ")
+}
+
+func buildRestartPrompt(projectID string, stateMgr *state.Manager, fs *store.FileStore) string {
+	claudeMd := filepath.Join(core.HomeDir(), "pink-tools", ".claude", "CLAUDE.md")
+
+	var parts []string
+	parts = append(parts, "Session restarted (context limit).")
+
+	if projectID != "" {
+		if p := stateMgr.GetProject(projectID); p != nil {
+			parts = append(parts, fmt.Sprintf("Project: %s.", p.Name))
+		}
+
+		if ctx := readProjectContext(fs, projectID); ctx != "" {
+			parts = append(parts, fmt.Sprintf("\nProject context:\n%s\n", ctx))
+		}
+	}
+
+	parts = append(parts, fmt.Sprintf("Read configuration: %s. Then wait for instructions.", claudeMd))
+
+	return strings.Join(parts, " ")
+}
+
+func buildAttachPrompt() string {
+	claudeMd := filepath.Join(core.HomeDir(), "pink-tools", ".claude", "CLAUDE.md")
+	return fmt.Sprintf("Continuing a Desktop session via pink-agent. Output now streams to Telegram. Read configuration: %s. Confirm you're ready to continue.", claudeMd)
 }
 
 // readProjectContext reads PROJECT.md from store, returns empty string if missing or placeholder.
@@ -784,9 +807,7 @@ func (b *Bot) AttachSession(sessionID, dir, name string) (*AttachSessionResult, 
 		return nil, fmt.Errorf("spawn claude: %w", err)
 	}
 
-	claudeMd := filepath.Join(core.HomeDir(), "pink-tools", ".claude", "CLAUDE.md")
-	initMsg := fmt.Sprintf("You are continuing a Desktop session via pink-agent. Your output now streams to Telegram. Read configuration: %s", claudeMd)
-	b.claude.Send(threadID, initMsg)
+	b.claude.Send(threadID, buildAttachPrompt())
 
 	return &AttachSessionResult{
 		ID:       projectID,
