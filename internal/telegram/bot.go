@@ -23,7 +23,11 @@ import (
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
-const maxPendingFiles = 100
+type messageBatch struct {
+	messages []*ForumMessage
+	files    []string
+	timer    *time.Timer
+}
 
 // ForumUpdate is our own update struct that includes message_thread_id.
 type ForumUpdate struct {
@@ -93,7 +97,7 @@ type Bot struct {
 	claude  *claude.Manager
 	store   *store.FileStore
 	output  *OutputManager
-	pending map[int][]string // threadID → pending file paths
+	batches map[int]*messageBatch
 	dmSent map[int64]bool // chatID → already sent setup instructions
 }
 
@@ -109,7 +113,7 @@ func NewBot(token string, chatID int64, stateMgr *state.Manager, claudeMgr *clau
 		state:       stateMgr,
 		claude:      claudeMgr,
 		store:       fileStore,
-		pending: make(map[int][]string),
+		batches: make(map[int]*messageBatch),
 		dmSent:  make(map[int64]bool),
 	}
 
@@ -263,55 +267,30 @@ func (b *Bot) handleUpdate(ctx context.Context, update ForumUpdate) {
 		return
 	}
 
-	// /stop command in topic
+	// /stop command — flush batch, then interrupt
 	if msg.Text == "/stop" || strings.HasPrefix(msg.Text, "/stop@") {
+		b.flushExistingBatch(ctx, threadID)
 		b.claude.Interrupt(threadID)
 		b.output.FlushAndInterrupt(threadID)
 		return
 	}
 
-	// /store command in topic
+	// /store command — flush batch, then handle
 	if msg.Text == "/store" || strings.HasPrefix(msg.Text, "/store@") {
+		b.flushExistingBatch(ctx, threadID)
 		b.handleStoreCommand(threadID)
 		return
 	}
 
-	// Session topic — handle voice, files, text
+	// Voice — flush batch, then handle immediately
 	if msg.Voice != nil {
+		b.flushExistingBatch(ctx, threadID)
 		b.handleVoice(ctx, msg)
 		return
 	}
 
-	// Collect files
-	b.collectFiles(msg)
-
-	// Get text
-	text := msg.Caption
-	if text == "" {
-		text = msg.Text
-	}
-	if text == "" {
-		return
-	}
-
-	// Gather pending files
-	files := b.pending[threadID]
-	delete(b.pending, threadID)
-
-	// Build message with file paths
-	var message string
-	if len(files) > 0 {
-		message = "Files:\n"
-		for _, f := range files {
-			message += f + "\n"
-		}
-		message += "\n"
-	}
-	message += text
-
-	SendChatAction(b.api, b.chatID, threadID, "typing")
-	b.output.SetUserMessage(threadID, msg.MessageID)
-	b.sendToClaude(ctx, threadID, message)
+	// Everything else — add to batch (text, photos, docs, video, audio)
+	b.addToBatch(ctx, msg)
 }
 
 func (b *Bot) sendToClaude(ctx context.Context, threadID int, text string) {
@@ -444,6 +423,12 @@ func (b *Bot) handleTopicClosed(ctx context.Context, threadID int) {
 		return
 	}
 
+	if batch, ok := b.batches[threadID]; ok {
+		if batch.timer != nil {
+			batch.timer.Stop()
+		}
+		delete(b.batches, threadID)
+	}
 	b.claude.Stop(threadID)
 	b.output.Cleanup(threadID)
 	b.store.DeleteProject(p.ID)
@@ -500,6 +485,12 @@ func (b *Bot) DeleteProject(projectID string) error {
 	}
 
 	if p.ThreadID != 0 {
+		if batch, ok := b.batches[p.ThreadID]; ok {
+			if batch.timer != nil {
+				batch.timer.Stop()
+			}
+			delete(b.batches, p.ThreadID)
+		}
 		b.claude.Stop(p.ThreadID)
 		b.output.Cleanup(p.ThreadID)
 		DeleteForumTopic(b.api, b.chatID, p.ThreadID)
@@ -556,18 +547,25 @@ func (b *Bot) handleVoice(ctx context.Context, msg *ForumMessage) {
 	b.sendToClaude(ctx, threadID, voicePrefix+text)
 }
 
-func (b *Bot) collectFiles(msg *ForumMessage) {
+func (b *Bot) addToBatch(ctx context.Context, msg *ForumMessage) {
 	threadID := msg.MessageThreadID
 
-	if msg.Photo != nil && len(msg.Photo) > 0 {
+	batch, ok := b.batches[threadID]
+	if !ok {
+		batch = &messageBatch{}
+		b.batches[threadID] = batch
+	}
+
+	// Download files
+	if len(msg.Photo) > 0 {
 		photo := msg.Photo[len(msg.Photo)-1]
 		if path, err := b.downloadFile(photo.FileID, "photo.jpg"); err == nil {
-			b.addPendingFile(threadID, path)
+			batch.files = append(batch.files, path)
 		}
 	}
 	if msg.Document != nil {
 		if path, err := b.downloadFile(msg.Document.FileID, msg.Document.FileName); err == nil {
-			b.addPendingFile(threadID, path)
+			batch.files = append(batch.files, path)
 		}
 	}
 	if msg.Video != nil {
@@ -576,7 +574,7 @@ func (b *Bot) collectFiles(msg *ForumMessage) {
 			filename = msg.Video.FileName
 		}
 		if path, err := b.downloadFile(msg.Video.FileID, filename); err == nil {
-			b.addPendingFile(threadID, path)
+			batch.files = append(batch.files, path)
 		}
 	}
 	if msg.Audio != nil {
@@ -585,18 +583,71 @@ func (b *Bot) collectFiles(msg *ForumMessage) {
 			filename = msg.Audio.FileName
 		}
 		if path, err := b.downloadFile(msg.Audio.FileID, filename); err == nil {
-			b.addPendingFile(threadID, path)
+			batch.files = append(batch.files, path)
 		}
 	}
+
+	batch.messages = append(batch.messages, msg)
+
+	// Reset timer
+	if batch.timer != nil {
+		batch.timer.Stop()
+	}
+	batch.timer = time.AfterFunc(1*time.Second, func() {
+		b.flushBatch(ctx, threadID)
+	})
 }
 
-func (b *Bot) addPendingFile(threadID int, path string) {
-	files := b.pending[threadID]
-	if len(files) >= maxPendingFiles {
-		os.Remove(files[0])
-		files = files[1:]
+func (b *Bot) flushBatch(ctx context.Context, threadID int) {
+	batch, ok := b.batches[threadID]
+	if !ok {
+		return
 	}
-	b.pending[threadID] = append(files, path)
+	delete(b.batches, threadID)
+
+	// Collect texts
+	var texts []string
+	for _, msg := range batch.messages {
+		t := msg.Caption
+		if t == "" {
+			t = msg.Text
+		}
+		if t != "" {
+			texts = append(texts, t)
+		}
+	}
+
+	if len(texts) == 0 && len(batch.files) == 0 {
+		return
+	}
+
+	// Build message
+	var message string
+	if len(batch.files) > 0 {
+		message = "Files:\n"
+		for _, f := range batch.files {
+			message += f + "\n"
+		}
+		message += "\n"
+	}
+	message += strings.Join(texts, "\n")
+
+	// Use last message ID for reply tracking
+	lastMsg := batch.messages[len(batch.messages)-1]
+	SendChatAction(b.api, b.chatID, threadID, "typing")
+	b.output.SetUserMessage(threadID, lastMsg.MessageID)
+	b.sendToClaude(ctx, threadID, message)
+}
+
+func (b *Bot) flushExistingBatch(ctx context.Context, threadID int) {
+	batch, ok := b.batches[threadID]
+	if !ok {
+		return
+	}
+	if batch.timer != nil {
+		batch.timer.Stop()
+	}
+	b.flushBatch(ctx, threadID)
 }
 
 func (b *Bot) downloadFile(fileID, filename string) (string, error) {
