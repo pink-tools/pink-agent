@@ -38,6 +38,8 @@ type OutputEvent struct {
 	Subtype   string          `json:"subtype,omitempty"`
 	SessionID string          `json:"session_id,omitempty"`
 	Status    string          `json:"status,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
+	Result    string          `json:"result,omitempty"`
 	Raw       json.RawMessage `json:"-"`
 }
 

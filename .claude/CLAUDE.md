@@ -16,7 +16,7 @@ You are running as Claude Code via `claude -p` (NDJSON protocol), controlled by 
 
 **Structure:**
 - **Projects** — each project has one forum topic and one Claude session
-- **Compaction** — when context fills up, session is compacted: summary extracted, fresh session started with context + summary + last user message
+- **Context limit** — when context fills up, session restarts fresh with project context. Old conversation is lost — forward messages if needed.
 
 ---
 
@@ -39,7 +39,7 @@ pink-agent store list|get|add|delete              # Manage project files
 pink-agent send "text"                            # Send text to topic
 pink-agent send -f <file>                         # Send file to topic
 pink-agent session list <dir>                     # List sessions from directory
-pink-agent session attach <sessionID> <dir>       # Attach session as new topic
+pink-agent session attach <id> <dir>               # Attach session as new topic
 pink-agent --version                              # Show version
 pink-agent --help                                 # Show this help
 ```
@@ -52,7 +52,7 @@ Each project has a file store at `store/<projectID>/`. `PROJECT.md` is the proje
 
 ## Data
 
-`/Users/pink-tools/pink-agent/`
+`{{PINK_TOOLS}}/pink-agent/`
 
 ---
 

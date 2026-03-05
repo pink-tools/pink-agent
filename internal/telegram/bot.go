@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -95,11 +94,7 @@ type Bot struct {
 	store   *store.FileStore
 	output  *OutputManager
 	pending map[int][]string // threadID → pending file paths
-	dmSent  map[int64]bool   // chatID → already sent setup instructions
-
-	mu          sync.Mutex
-	lastUserMsg map[int]string // threadID → last user message text
-	compacting  map[int]bool   // threadID → compaction in progress
+	dmSent map[int64]bool // chatID → already sent setup instructions
 }
 
 func NewBot(token string, chatID int64, stateMgr *state.Manager, claudeMgr *claude.Manager, fileStore *store.FileStore) (*Bot, error) {
@@ -114,10 +109,8 @@ func NewBot(token string, chatID int64, stateMgr *state.Manager, claudeMgr *clau
 		state:       stateMgr,
 		claude:      claudeMgr,
 		store:       fileStore,
-		pending:     make(map[int][]string),
-		dmSent:      make(map[int64]bool),
-		lastUserMsg: make(map[int]string),
-		compacting:  make(map[int]bool),
+		pending: make(map[int][]string),
+		dmSent:  make(map[int64]bool),
 	}
 
 	b.output = NewOutputManager(api, chatID)
@@ -316,26 +309,12 @@ func (b *Bot) handleUpdate(ctx context.Context, update ForumUpdate) {
 	}
 	message += text
 
-	// Save last user message for compaction
-	b.mu.Lock()
-	b.lastUserMsg[threadID] = message
-	b.mu.Unlock()
-
 	SendChatAction(b.api, b.chatID, threadID, "typing")
 	b.output.SetUserMessage(threadID, msg.MessageID)
 	b.sendToClaude(ctx, threadID, message)
 }
 
 func (b *Bot) sendToClaude(ctx context.Context, threadID int, text string) {
-	// Guard: if compacting, reject
-	b.mu.Lock()
-	if b.compacting[threadID] {
-		b.mu.Unlock()
-		SendToThread(b.api, b.chatID, threadID, "Session is compacting, please wait...", "", nil)
-		return
-	}
-	b.mu.Unlock()
-
 	project := b.state.GetProjectByThread(threadID)
 	if project == nil {
 		return
@@ -364,6 +343,7 @@ func (b *Bot) sendToClaude(ctx context.Context, threadID int, text string) {
 // spawnClaude starts a claude process for a thread, wiring up event handling.
 func (b *Bot) spawnClaude(threadID int, sessionID string, extraEnv []string) error {
 	var workDir string
+	extraEnv = append(extraEnv, "DISABLE_AUTO_COMPACT=true")
 	// Inject project/thread env vars for CLI commands
 	if p := b.state.GetProjectByThread(threadID); p != nil {
 		extraEnv = append(extraEnv,
@@ -383,11 +363,36 @@ func (b *Bot) spawnClaude(threadID int, sessionID string, extraEnv []string) err
 			}
 		}
 
-		// Detect compaction signal
-		if ev.Type == "system" && ev.Subtype == "status" && ev.Status == "compacting" {
-			go b.compactSession(context.Background(), threadID)
+		// Detect context limit
+		if ev.Type == "result" && ev.IsError && ev.Result == "Prompt is too long" {
+			go b.restartSession(context.Background(), threadID)
 		}
 	})
+}
+
+func (b *Bot) restartSession(ctx context.Context, threadID int) {
+	p := b.state.GetProjectByThread(threadID)
+	if p == nil {
+		return
+	}
+
+	b.claude.Stop(threadID)
+	b.output.Cleanup(threadID)
+
+	SendToThread(b.api, b.chatID, threadID,
+		"⚠️ Context limit reached. This session is done — starting fresh.\n\n"+
+			"Your conversation history is gone. If you need something from the old session, forward the messages here.",
+		"", nil)
+
+	if err := b.spawnClaude(threadID, "", nil); err != nil {
+		SendToThread(b.api, b.chatID, threadID, "Failed to restart: "+err.Error(), "", nil)
+		return
+	}
+
+	initPrompt := buildInitPrompt(p.ID, b.state, b.store)
+	b.claude.Send(threadID, initPrompt)
+
+	log.Info(ctx, "session restarted (context limit)", log.Attr{K: "project", V: p.Name})
 }
 
 func (b *Bot) handleTopicCreated(ctx context.Context, threadID int, name string, fromID int64) {
@@ -547,14 +552,8 @@ func (b *Bot) handleVoice(ctx context.Context, msg *ForumMessage) {
 	SendChatAction(b.api, b.chatID, threadID, "typing")
 	b.output.SetUserMessage(threadID, msg.MessageID)
 
-	// Save last user message for compaction
 	voicePrefix := "[VOICE INPUT: May contain speech recognition errors. Ask for clarification if unclear.] "
-	fullMsg := voicePrefix + text
-	b.mu.Lock()
-	b.lastUserMsg[threadID] = fullMsg
-	b.mu.Unlock()
-
-	b.sendToClaude(ctx, threadID, fullMsg)
+	b.sendToClaude(ctx, threadID, voicePrefix+text)
 }
 
 func (b *Bot) collectFiles(msg *ForumMessage) {
@@ -639,7 +638,8 @@ func buildInitPrompt(projectID string, stateMgr *state.Manager, fs *store.FileSt
 		}
 	}
 
-	parts = append(parts, "\nRead configuration: /Users/.claude/CLAUDE.md")
+	claudeMd := filepath.Join(core.HomeDir(), "pink-tools", ".claude", "CLAUDE.md")
+	parts = append(parts, fmt.Sprintf("\nYou ARE running via pink-agent. Read configuration: %s", claudeMd))
 
 	return strings.Join(parts, "\n")
 }
@@ -728,6 +728,14 @@ func (b *Bot) AttachSession(sessionID, dir, name string) (*AttachSessionResult, 
 	b.state.SetProjectThread(projectID, threadID)
 	b.state.SetProjectSession(projectID, sessionID)
 	b.store.InitProject(projectID)
+
+	if err := b.spawnClaude(threadID, sessionID, nil); err != nil {
+		return nil, fmt.Errorf("spawn claude: %w", err)
+	}
+
+	claudeMd := filepath.Join(core.HomeDir(), "pink-tools", ".claude", "CLAUDE.md")
+	initMsg := fmt.Sprintf("You are continuing a Desktop session via pink-agent. Your output now streams to Telegram. Read configuration: %s", claudeMd)
+	b.claude.Send(threadID, initMsg)
 
 	return &AttachSessionResult{
 		ID:       projectID,
