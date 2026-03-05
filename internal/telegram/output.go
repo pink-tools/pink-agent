@@ -273,8 +273,8 @@ func (om *OutputManager) handleToolResult(topic *TopicOutput, ev claude.OutputEv
 		}
 
 		content := c.Content
-		if len(content) > 500 {
-			content = content[:500] + "..."
+		if len(content) > 3800 {
+			content = content[:3800] + "..."
 		}
 
 		var prefix string
@@ -293,6 +293,9 @@ func (om *OutputManager) handleToolResult(topic *TopicOutput, ev claude.OutputEv
 			EditMessage(om.api, om.chatID, topic.toolMsgID, newHTML, "HTML", nil)
 		} else {
 			// Fallback: send as separate message
+			if len(content) > 3800 {
+				content = content[:3800] + "..."
+			}
 			text := fmt.Sprintf("<blockquote expandable>%s <code>%s</code></blockquote>",
 				prefix, escapeHTMLStr(content))
 			SendToThread(om.api, om.chatID, topic.threadID, text, "HTML", nil)
@@ -452,8 +455,8 @@ func (om *OutputManager) renderToolFromState(topic *TopicOutput) {
 		}
 	}
 
-	if len(inputStr) > 500 {
-		inputStr = inputStr[:500] + "..."
+	if len(inputStr) > 3800 {
+		inputStr = inputStr[:3800] + "..."
 	}
 
 	var html string

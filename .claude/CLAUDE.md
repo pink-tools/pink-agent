@@ -29,17 +29,19 @@ You are running as Claude Code via `claude -p` (NDJSON protocol), controlled by 
 ## CLI
 
 ```bash
-pink-agent                    # Start daemon
-pink-agent stop               # Stop daemon
-pink-agent status             # Check if running
-pink-agent project list       # List projects
-pink-agent store list         # List files in project store
-pink-agent store get <path>   # Get file content
-pink-agent store add <path> "content"        # Add file (fails if exists)
-pink-agent store add --force <path> "content" # Overwrite file
-pink-agent store delete <path>               # Delete file
-pink-agent send "text"        # Send text to topic
-pink-agent send -f <file>     # Send file to topic
+pink-agent                                        # Start daemon
+pink-agent stop                                   # Stop daemon
+pink-agent status                                 # Check if running
+pink-agent project list                           # List projects
+pink-agent project create "Name" ["Prompt"] [--dir path]  # Create project
+pink-agent project delete [id-or-name]            # Delete project
+pink-agent store list|get|add|delete              # Manage project files
+pink-agent send "text"                            # Send text to topic
+pink-agent send -f <file>                         # Send file to topic
+pink-agent session list <dir>                     # List sessions from directory
+pink-agent session attach <sessionID> <dir>       # Attach session as new topic
+pink-agent --version                              # Show version
+pink-agent --help                                 # Show this help
 ```
 
 `store` and `send` use env vars `PINK_PROJECT_ID` and `PINK_THREAD_ID` (set automatically). Fallback: `pink-agent store -p "Project Name" list`.

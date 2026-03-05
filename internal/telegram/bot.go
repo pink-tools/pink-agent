@@ -250,7 +250,7 @@ func (b *Bot) handleUpdate(ctx context.Context, update ForumUpdate) {
 	// Service messages for forum topics
 	if threadID != 0 {
 		if msg.ForumTopicCreated != nil {
-			b.handleTopicCreated(ctx, threadID, msg.ForumTopicCreated.Name)
+			b.handleTopicCreated(ctx, threadID, msg.ForumTopicCreated.Name, msg.From.ID)
 			return
 		}
 		if msg.ForumTopicEdited != nil && msg.ForumTopicEdited.Name != "" {
@@ -319,7 +319,7 @@ func (b *Bot) handleUpdate(ctx context.Context, update ForumUpdate) {
 	b.lastUserMsg[threadID] = message
 	b.mu.Unlock()
 
-	SetReaction(b.api, b.chatID, msg.MessageID, "\u26a1")
+	SendChatAction(b.api, b.chatID, threadID, "typing")
 	b.output.SetUserMessage(threadID, msg.MessageID)
 	b.sendToClaude(ctx, threadID, message)
 }
@@ -361,15 +361,17 @@ func (b *Bot) sendToClaude(ctx context.Context, threadID int, text string) {
 
 // spawnClaude starts a claude process for a thread, wiring up event handling.
 func (b *Bot) spawnClaude(threadID int, sessionID string, extraEnv []string) error {
+	var workDir string
 	// Inject project/thread env vars for CLI commands
 	if p := b.state.GetProjectByThread(threadID); p != nil {
 		extraEnv = append(extraEnv,
 			fmt.Sprintf("PINK_PROJECT_ID=%s", p.ID),
 			fmt.Sprintf("PINK_THREAD_ID=%d", threadID),
 		)
+		workDir = p.Dir
 	}
 
-	return b.claude.Start(threadID, sessionID, extraEnv, func(ev claude.OutputEvent) {
+	return b.claude.Start(threadID, sessionID, workDir, extraEnv, func(ev claude.OutputEvent) {
 		b.output.HandleEvent(threadID, ev)
 
 		// Save session ID from init event
@@ -386,14 +388,19 @@ func (b *Bot) spawnClaude(threadID int, sessionID string, extraEnv []string) err
 	})
 }
 
-func (b *Bot) handleTopicCreated(ctx context.Context, threadID int, name string) {
-	// Guard: skip if project already exists for this thread (CLI-created)
+func (b *Bot) handleTopicCreated(ctx context.Context, threadID int, name string, fromID int64) {
+	// Skip topics created by the bot itself (via CLI or IPC)
+	if fromID == b.api.Self.ID {
+		return
+	}
+
+	// Guard: skip if project already exists for this thread
 	if b.state.GetProjectByThread(threadID) != nil {
 		return
 	}
 
 	// Create project and link to this thread
-	projectID, err := b.state.CreateProject(name)
+	projectID, err := b.state.CreateProject(name, "")
 	if err != nil {
 		log.Error(ctx, "create project failed", log.Attr{K: "error", V: err.Error()})
 		return
@@ -441,13 +448,13 @@ type CreateProjectResult struct {
 }
 
 // CreateProject creates a forum topic, project, and Claude session.
-func (b *Bot) CreateProject(name, prompt string) (*CreateProjectResult, error) {
+func (b *Bot) CreateProject(name, prompt, dir string) (*CreateProjectResult, error) {
 	threadID, err := CreateForumTopic(b.api, b.chatID, name)
 	if err != nil {
 		return nil, fmt.Errorf("create topic: %w", err)
 	}
 
-	projectID, err := b.state.CreateProject(name)
+	projectID, err := b.state.CreateProject(name, dir)
 	if err != nil {
 		return nil, fmt.Errorf("create project: %w", err)
 	}
@@ -457,8 +464,6 @@ func (b *Bot) CreateProject(name, prompt string) (*CreateProjectResult, error) {
 	if err := b.spawnClaude(threadID, "", nil); err != nil {
 		return nil, fmt.Errorf("spawn claude: %w", err)
 	}
-
-	SendToThread(b.api, b.chatID, threadID, "\U0001f984 Pink Agent activated and ready to work.", "", nil)
 
 	initPrompt := buildInitPrompt(projectID, b.state, b.store)
 	b.claude.Send(threadID, initPrompt)
@@ -531,7 +536,7 @@ func (b *Bot) handleVoice(ctx context.Context, msg *ForumMessage) {
 	SendToThread(b.api, b.chatID, threadID, "\U0001f3a4 "+text, "", nil)
 
 	// Switch to processing reaction
-	SetReaction(b.api, b.chatID, msg.MessageID, "\u26a1")
+	SendChatAction(b.api, b.chatID, threadID, "typing")
 	b.output.SetUserMessage(threadID, msg.MessageID)
 
 	// Save last user message for compaction
@@ -692,4 +697,33 @@ func transcribe(audioPath string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// AttachSessionResult is the response for CLI session attach.
+type AttachSessionResult struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	ThreadID int    `json:"threadId"`
+}
+
+// AttachSession creates a project from an existing Claude session.
+func (b *Bot) AttachSession(sessionID, dir, name string) (*AttachSessionResult, error) {
+	threadID, err := CreateForumTopic(b.api, b.chatID, name)
+	if err != nil {
+		return nil, fmt.Errorf("create topic: %w", err)
+	}
+
+	projectID, err := b.state.CreateProject(name, dir)
+	if err != nil {
+		return nil, fmt.Errorf("create project: %w", err)
+	}
+	b.state.SetProjectThread(projectID, threadID)
+	b.state.SetProjectSession(projectID, sessionID)
+	b.store.InitProject(projectID)
+
+	return &AttachSessionResult{
+		ID:       projectID,
+		Name:     name,
+		ThreadID: threadID,
+	}, nil
 }

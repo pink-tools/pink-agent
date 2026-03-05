@@ -44,11 +44,13 @@ Usage:
   pink-agent stop                     Stop daemon
   pink-agent status                   Check if running
   pink-agent project list             List projects
-  pink-agent project create "Name" ["Prompt"]  Create project
+  pink-agent project create "Name" ["Prompt"] [--dir path]  Create project
   pink-agent project delete [id-or-name]       Delete project
   pink-agent store list|get|add|delete Manage project files
   pink-agent send "text"              Send text to topic
   pink-agent send -f <file>           Send file to topic
+  pink-agent session list <dir>       List sessions from directory
+  pink-agent session attach <id> <dir> Attach session as new topic
   pink-agent --version                Show version
   pink-agent --help                   Show this help
 `, version),
@@ -86,6 +88,10 @@ Usage:
 				Desc: "Send text or file to topic",
 				Run:  cli.HandleSend,
 			},
+			"session": {
+				Desc: "Session management (list, attach)",
+				Run:  cli.HandleSession,
+			},
 		},
 		IPCHandler: func(cmd string) string {
 			name, payload, _ := strings.Cut(cmd, ":")
@@ -119,11 +125,32 @@ Usage:
 				var req struct {
 					Name   string `json:"name"`
 					Prompt string `json:"prompt"`
+					Dir    string `json:"dir"`
 				}
 				if err := json.Unmarshal([]byte(payload), &req); err != nil {
 					return "ERROR:" + err.Error()
 				}
-				result, err := dm.bot.CreateProject(req.Name, req.Prompt)
+				result, err := dm.bot.CreateProject(req.Name, req.Prompt, req.Dir)
+				if err != nil {
+					return "ERROR:" + err.Error()
+				}
+				data, _ := json.Marshal(result)
+				return string(data)
+
+			case "attachSession":
+				dm := d.Load()
+				if dm == nil {
+					return "ERROR:daemon not ready"
+				}
+				var req struct {
+					SessionID string `json:"sessionId"`
+					Dir       string `json:"dir"`
+					Name      string `json:"name"`
+				}
+				if err := json.Unmarshal([]byte(payload), &req); err != nil {
+					return "ERROR:" + err.Error()
+				}
+				result, err := dm.bot.AttachSession(req.SessionID, req.Dir, req.Name)
 				if err != nil {
 					return "ERROR:" + err.Error()
 				}

@@ -18,6 +18,7 @@ type Project struct {
 	Name      string `json:"name"`
 	ThreadID  int    `json:"threadId,omitempty"`
 	SessionID string `json:"sessionId,omitempty"`
+	Dir       string `json:"dir,omitempty"`
 }
 
 type State struct {
@@ -174,17 +175,30 @@ func (m *Manager) GetProjectByThread(threadID int) *Project {
 
 // --- Projects ---
 
-func (m *Manager) CreateProject(name string) (string, error) {
+func (m *Manager) CreateProject(name, dir string) (string, error) {
 	id := uuid.New().String()
 	err := m.mutate(func(s *State) (*State, error) {
 		ns := s.Clone()
 		ns.Projects = append(ns.Projects, Project{
 			ID:   id,
 			Name: name,
+			Dir:  dir,
 		})
 		return ns, m.storage.Save(ns)
 	})
 	return id, err
+}
+
+func (m *Manager) SetProjectDir(id, dir string) error {
+	return m.mutate(func(s *State) (*State, error) {
+		ns := s.Clone()
+		p := ns.GetProject(id)
+		if p == nil {
+			return nil, ErrProjectNotFound
+		}
+		p.Dir = dir
+		return ns, m.storage.Save(ns)
+	})
 }
 
 func (m *Manager) DeleteProject(id string) error {
@@ -358,7 +372,7 @@ func migrateOldFormat(dataDir string, m *Manager) []string {
 			if sess.Name != "" {
 				name = op.Name + " — " + sess.Name
 			}
-			newID, err := m.CreateProject(name)
+			newID, err := m.CreateProject(name, "")
 			if err != nil {
 				continue
 			}

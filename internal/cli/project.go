@@ -18,6 +18,7 @@ type cliProject struct {
 	Name      string `json:"name"`
 	ThreadID  int    `json:"threadId,omitempty"`
 	SessionID string `json:"sessionId,omitempty"`
+	Dir       string `json:"dir,omitempty"`
 }
 
 func HandleProject(args []string) error {

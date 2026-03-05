@@ -154,3 +154,12 @@ func SetBotCommands(api *tgbotapi.BotAPI, chatID int64) {
 	params["scope"] = string(scope)
 	api.MakeRequest("setMyCommands", params)
 }
+
+// SendChatAction sends a chat action (e.g. "typing") to a forum topic.
+func SendChatAction(api *tgbotapi.BotAPI, chatID int64, threadID int, action string) {
+	params := tgbotapi.Params{}
+	params.AddNonZero64("chat_id", chatID)
+	params.AddNonZero("message_thread_id", threadID)
+	params["action"] = action
+	api.MakeRequest("sendChatAction", params)
+}

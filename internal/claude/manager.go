@@ -22,7 +22,7 @@ func NewManager(mcpConfig string) *Manager {
 
 // Start spawns a claude process for the given thread.
 // If sessionID is empty, starts a new session. Otherwise resumes.
-func (m *Manager) Start(threadID int, sessionID string, extraEnv []string, onEvent EventHandler) error {
+func (m *Manager) Start(threadID int, sessionID, workDir string, extraEnv []string, onEvent EventHandler) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -32,7 +32,7 @@ func (m *Manager) Start(threadID int, sessionID string, extraEnv []string, onEve
 		delete(m.processes, threadID)
 	}
 
-	p, err := Start(sessionID, m.mcpConfig, extraEnv, func(ev OutputEvent) {
+	p, err := Start(sessionID, m.mcpConfig, workDir, extraEnv, func(ev OutputEvent) {
 		onEvent(ev)
 
 		// Auto-remove on process death after result event

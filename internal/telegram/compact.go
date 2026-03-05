@@ -86,7 +86,7 @@ func (b *Bot) getSummary(ctx context.Context, threadID int, sessionID string) st
 
 	extraEnv := []string{"DISABLE_AUTO_COMPACT=true"}
 
-	err := b.claude.Start(tempKey, sessionID, extraEnv, func(ev claude.OutputEvent) {
+	err := b.claude.Start(tempKey, sessionID, "", extraEnv, func(ev claude.OutputEvent) {
 		if ev.Type == "result" {
 			var res struct {
 				Result string `json:"result"`

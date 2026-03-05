@@ -27,7 +27,7 @@ type Process struct {
 type EventHandler func(OutputEvent)
 
 // Start spawns a claude -p process with NDJSON protocol.
-func Start(sessionID, mcpConfig string, extraEnv []string, onEvent EventHandler) (*Process, error) {
+func Start(sessionID, mcpConfig, workDir string, extraEnv []string, onEvent EventHandler) (*Process, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	args := []string{
@@ -50,7 +50,11 @@ func Start(sessionID, mcpConfig string, extraEnv []string, onEvent EventHandler)
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Env = append(cleanEnv(), extraEnv...)
-	cmd.Dir = core.BaseDir()
+	if workDir != "" {
+		cmd.Dir = workDir
+	} else {
+		cmd.Dir = core.BaseDir()
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
