@@ -53,7 +53,7 @@ func Start(sessionID, mcpConfig, workDir string, extraEnv []string, onEvent Even
 	if workDir != "" {
 		cmd.Dir = workDir
 	} else {
-		cmd.Dir = core.BaseDir()
+		cmd.Dir = core.HomeDir()
 	}
 
 	stdin, err := cmd.StdinPipe()
