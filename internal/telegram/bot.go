@@ -45,9 +45,11 @@ type ForumMessage struct {
 	Video           *TGVideo    `json:"video,omitempty"`
 	Audio           *TGAudio    `json:"audio,omitempty"`
 	IsTopicMessage  bool        `json:"is_topic_message,omitempty"`
-	ForumTopicClosed  *struct{}         `json:"forum_topic_closed,omitempty"`
-	ForumTopicCreated *ForumTopicInfo   `json:"forum_topic_created,omitempty"`
-	ForumTopicEdited  *ForumTopicInfo   `json:"forum_topic_edited,omitempty"`
+	ForumTopicClosed   *struct{}        `json:"forum_topic_closed,omitempty"`
+	ForumTopicCreated  *ForumTopicInfo  `json:"forum_topic_created,omitempty"`
+	ForumTopicEdited   *ForumTopicInfo  `json:"forum_topic_edited,omitempty"`
+	ForumTopicReopened *struct{}        `json:"forum_topic_reopened,omitempty"`
+	ForumTopicDeleted  *struct{}        `json:"forum_topic_deleted,omitempty"`
 }
 
 type ForumTopicInfo struct {
@@ -432,12 +434,18 @@ func (b *Bot) handleTopicEdited(ctx context.Context, threadID int, name string) 
 }
 
 func (b *Bot) handleTopicClosed(ctx context.Context, threadID int) {
+	p := b.state.GetProjectByThread(threadID)
+	if p == nil {
+		return
+	}
+
 	b.claude.Stop(threadID)
 	b.output.Cleanup(threadID)
+	b.store.DeleteProject(p.ID)
+	b.state.DeleteProject(p.ID)
+	DeleteForumTopic(b.api, b.chatID, threadID)
 
-	if p := b.state.GetProjectByThread(threadID); p != nil {
-		b.state.ClearProjectThread(p.ID)
-	}
+	log.Info(ctx, "project deleted", log.Attr{K: "project", V: p.Name}, log.Attr{K: "threadId", V: threadID})
 }
 
 // CreateProjectResult is the response for CLI project creation.

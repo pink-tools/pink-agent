@@ -11,7 +11,7 @@ You are running as Claude Code via `claude -p` (NDJSON protocol), controlled by 
 - Your stdout streams back to the Telegram topic
 - User creates topic in Telegram → bot auto-creates project + session
 - User renames topic → bot updates project name
-- User closes topic → bot stops session + cleans up
+- User closes topic → bot deletes project, store, session, and the topic itself
 - `/stop` in topic → interrupts current Claude response
 
 **Structure:**

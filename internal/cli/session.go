@@ -89,15 +89,11 @@ func sessionList(dir string) error {
 	}
 
 	for _, s := range sessions {
-		short := s.ID
-		if len(short) > 8 {
-			short = short[:8]
+		if s.Preview == "" {
+			continue
 		}
-		preview := s.Preview
-		if len(preview) > 80 {
-			preview = preview[:80] + "..."
-		}
-		fmt.Printf("  %s  %s  %s\n", short, s.Date.Format("2006-01-02"), preview)
+		preview := strings.ReplaceAll(s.Preview, "\n", " ")
+		fmt.Printf("  %s  %s  %s\n", s.ID, s.Date.Format("2006-01-02"), preview)
 	}
 
 	return nil
@@ -148,9 +144,17 @@ func sessionAttach(sessionID, dir string) error {
 }
 
 // encodeDir converts absolute path to Claude's encoded dir name.
-// /Users/miroslav/Desktop/foo → -Users-miroslav-Desktop-foo
+// /Users/miroslav/Desktop/polarizers.io → -Users-miroslav-Desktop-polarizers-io
 func encodeDir(abs string) string {
-	return strings.ReplaceAll(abs, "/", "-")
+	var b strings.Builder
+	for _, c := range abs {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' {
+			b.WriteRune(c)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
 }
 
 func firstUserMessage(path string) string {

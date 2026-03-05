@@ -74,16 +74,21 @@ func projectList() error {
 
 func projectCreate(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: pink-agent project create \"Name\" [\"Prompt\"]")
+		return fmt.Errorf("usage: pink-agent project create \"Name\" [\"Prompt\"] [--dir path]")
 	}
 
 	name := args[0]
-	var prompt string
-	if len(args) > 1 {
-		prompt = args[1]
+	var prompt, dir string
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--dir" && i+1 < len(args) {
+			dir = args[i+1]
+			i++
+		} else if prompt == "" {
+			prompt = args[i]
+		}
 	}
 
-	payload, _ := json.Marshal(map[string]string{"name": name, "prompt": prompt})
+	payload, _ := json.Marshal(map[string]string{"name": name, "prompt": prompt, "dir": dir})
 	response, err := core.SendCommand(serviceName, "createProject:"+string(payload))
 	if err != nil {
 		return fmt.Errorf("agent not running")
