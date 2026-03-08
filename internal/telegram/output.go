@@ -18,6 +18,14 @@ const (
 	editInterval  = 2 * time.Second
 )
 
+// pendingTool holds a buffered tool call waiting for its result.
+type pendingTool struct {
+	name     string
+	inputStr string
+	html     string
+	timer    *time.Timer
+}
+
 // TopicOutput tracks the streaming output state for one forum topic.
 type TopicOutput struct {
 	threadID     int
@@ -29,6 +37,7 @@ type TopicOutput struct {
 	toolInput    string    // accumulated tool input JSON
 	toolMsgID    int       // tool use message ID (for appending result)
 	toolMsgHTML  string    // tool use message HTML (for editing)
+	pending      *pendingTool // buffered tool call awaiting result
 	lastEditTime time.Time
 	editTimer    *time.Timer
 
@@ -46,14 +55,16 @@ type TopicOutput struct {
 type OutputManager struct {
 	api    *tgbotapi.BotAPI
 	chatID int64
+	sender *Sender
 	topics map[int]*TopicOutput
 	mu     sync.Mutex
 }
 
-func NewOutputManager(api *tgbotapi.BotAPI, chatID int64) *OutputManager {
+func NewOutputManager(api *tgbotapi.BotAPI, chatID int64, sender *Sender) *OutputManager {
 	return &OutputManager{
 		api:    api,
 		chatID: chatID,
+		sender: sender,
 		topics: make(map[int]*TopicOutput),
 	}
 }
@@ -129,7 +140,7 @@ func (om *OutputManager) HandleEvent(threadID int, ev claude.OutputEvent) {
 	case "content_block_stop":
 		switch topic.blockType {
 		case "tool_use":
-			om.renderToolFromState(topic)
+			om.bufferTool(topic)
 		case "text":
 			if topic.textBuffer != "" {
 				om.renderFinalText(topic)
@@ -175,10 +186,10 @@ func (om *OutputManager) HandleEvent(threadID int, ev claude.OutputEvent) {
 
 		if res.IsError {
 			text := fmt.Sprintf("❌ %s", res.Result)
-			SendToThread(om.api, om.chatID, topic.threadID, text, "", nil)
+			om.sender.Send(topic.threadID, text, "", nil)
 		}
 
-		om.prependContext(topic)
+		om.appendContext(topic)
 		om.clearReaction(topic)
 
 	case "user":
@@ -203,7 +214,7 @@ func (om *OutputManager) FlushAndInterrupt(threadID int) {
 	om.flushText(topic)
 	om.clearReaction(topic)
 
-	SendToThread(om.api, om.chatID, threadID, "Interrupted.", "", nil)
+	om.sender.Send(threadID, "Interrupted.", "", nil)
 }
 
 // Cleanup removes all state for a topic.
@@ -214,6 +225,9 @@ func (om *OutputManager) Cleanup(threadID int) {
 	if topic, ok := om.topics[threadID]; ok {
 		if topic.editTimer != nil {
 			topic.editTimer.Stop()
+		}
+		if topic.pending != nil {
+			topic.pending.timer.Stop()
 		}
 		delete(om.topics, threadID)
 	}
@@ -249,7 +263,7 @@ func (om *OutputManager) renderThinking(topic *TopicOutput) {
 	}
 
 	html := fmt.Sprintf("<blockquote expandable>\U0001f4ad <i>%s</i></blockquote>", escapeHTMLStr(text))
-	SendToThread(om.api, om.chatID, topic.threadID, html, "HTML", nil)
+	om.sender.Send(topic.threadID, html, "HTML", nil)
 
 	topic.thinkingBuffer = ""
 }
@@ -286,19 +300,25 @@ func (om *OutputManager) handleToolResult(topic *TopicOutput, ev claude.OutputEv
 
 		resultLine := fmt.Sprintf("\n%s <code>%s</code>", prefix, escapeHTMLStr(content))
 
+		// Fast tool: result arrived before 3s timer — render tool+result together
+		if topic.pending != nil {
+			topic.pending.timer.Stop()
+			base := strings.TrimSuffix(topic.pending.html, "</blockquote>")
+			combined := base + resultLine + "</blockquote>"
+			om.sender.Send(topic.threadID, combined, "HTML", nil)
+			topic.pending = nil
+			return
+		}
+
+		// Slow tool: tool was already rendered, edit to append result
 		if topic.toolMsgID != 0 && topic.toolMsgHTML != "" {
-			// Insert result before closing </blockquote>
 			base := strings.TrimSuffix(topic.toolMsgHTML, "</blockquote>")
 			newHTML := base + resultLine + "</blockquote>"
-			EditMessage(om.api, om.chatID, topic.toolMsgID, newHTML, "HTML", nil)
+			om.sender.Edit(topic.threadID, topic.toolMsgID, newHTML, "HTML", nil)
 		} else {
-			// Fallback: send as separate message
-			if len(content) > 3800 {
-				content = content[:3800] + "..."
-			}
 			text := fmt.Sprintf("<blockquote expandable>%s <code>%s</code></blockquote>",
 				prefix, escapeHTMLStr(content))
-			SendToThread(om.api, om.chatID, topic.threadID, text, "HTML", nil)
+			om.sender.Send(topic.threadID, text, "HTML", nil)
 		}
 
 		topic.toolMsgID = 0
@@ -307,7 +327,7 @@ func (om *OutputManager) handleToolResult(topic *TopicOutput, ev claude.OutputEv
 	}
 }
 
-func (om *OutputManager) prependContext(topic *TopicOutput) {
+func (om *OutputManager) appendContext(topic *TopicOutput) {
 	total := topic.lastInputTokens + topic.lastOutputTokens
 	window := topic.contextWindow
 	if window == 0 {
@@ -324,10 +344,10 @@ func (om *OutputManager) prependContext(topic *TopicOutput) {
 		if topic.lastTextMode != "HTML" {
 			content = escapeHTMLStr(content)
 		}
-		newContent := ctx + "\n" + content
-		EditMessage(om.api, om.chatID, topic.lastTextMsgID, newContent, "HTML", nil)
+		newContent := content + "\n" + ctx
+		om.sender.Edit(topic.threadID, topic.lastTextMsgID, newContent, "HTML", nil)
 	} else {
-		SendToThread(om.api, om.chatID, topic.threadID, ctx, "HTML", nil)
+		om.sender.Send(topic.threadID, ctx, "HTML", nil)
 	}
 
 	topic.lastTextMsgID = 0
@@ -374,12 +394,12 @@ func (om *OutputManager) doEdit(topic *TopicOutput) {
 	topic.lastEditTime = time.Now()
 
 	if topic.currentMsgID == 0 {
-		msgID, err := SendToThread(om.api, om.chatID, topic.threadID, text, "", nil)
+		msgID, err := om.sender.SendSync(topic.threadID, text, "", nil)
 		if err == nil {
 			topic.currentMsgID = msgID
 		}
 	} else {
-		EditMessage(om.api, om.chatID, topic.currentMsgID, text, "", nil)
+		om.sender.Edit(topic.threadID, topic.currentMsgID, text, "", nil)
 	}
 }
 
@@ -401,9 +421,9 @@ func (om *OutputManager) renderFinalText(topic *TopicOutput) {
 
 	for i, chunk := range chunks {
 		if i == 0 && topic.currentMsgID != 0 {
-			err := EditMessage(om.api, om.chatID, topic.currentMsgID, chunk, "HTML", nil)
+			err := om.sender.EditSync(topic.threadID, topic.currentMsgID, chunk, "HTML", nil)
 			if err != nil {
-				EditMessage(om.api, om.chatID, topic.currentMsgID, text, "", nil)
+				om.sender.Edit(topic.threadID, topic.currentMsgID, text, "", nil)
 				topic.lastTextMsgID = topic.currentMsgID
 				topic.lastTextContent = text
 				topic.lastTextMode = ""
@@ -413,7 +433,7 @@ func (om *OutputManager) renderFinalText(topic *TopicOutput) {
 				topic.lastTextMode = "HTML"
 			}
 		} else {
-			msgID, _ := SendToThread(om.api, om.chatID, topic.threadID, chunk, "HTML", nil)
+			msgID, _ := om.sender.SendSync(topic.threadID, chunk, "HTML", nil)
 			if i == 0 {
 				topic.currentMsgID = msgID
 			}
@@ -437,13 +457,11 @@ func (om *OutputManager) flushText(topic *TopicOutput) {
 	}
 }
 
-func (om *OutputManager) renderToolFromState(topic *TopicOutput) {
-	name := topic.toolName
-
-	var inputStr string
-	if topic.toolInput != "" {
+// buildToolHTML builds the blockquote HTML for a tool call.
+func buildToolHTML(name, inputJSON string) (html, inputStr string) {
+	if inputJSON != "" {
 		var input map[string]any
-		if err := json.Unmarshal([]byte(topic.toolInput), &input); err == nil {
+		if err := json.Unmarshal([]byte(inputJSON), &input); err == nil {
 			if cmd, ok := input["command"].(string); ok {
 				inputStr = cmd
 			} else {
@@ -451,7 +469,7 @@ func (om *OutputManager) renderToolFromState(topic *TopicOutput) {
 				inputStr = string(data)
 			}
 		} else {
-			inputStr = topic.toolInput
+			inputStr = inputJSON
 		}
 	}
 
@@ -459,20 +477,49 @@ func (om *OutputManager) renderToolFromState(topic *TopicOutput) {
 		inputStr = inputStr[:3800] + "..."
 	}
 
-	var html string
 	if inputStr != "" {
 		html = fmt.Sprintf("<blockquote expandable>\u25b6 <b>%s</b>\n<code>%s</code></blockquote>",
 			escapeHTMLStr(name), escapeHTMLStr(inputStr))
 	} else {
 		html = fmt.Sprintf("<blockquote expandable>\u25b6 <b>%s</b></blockquote>", escapeHTMLStr(name))
 	}
+	return html, inputStr
+}
 
-	msgID, _ := SendToThread(om.api, om.chatID, topic.threadID, html, "HTML", nil)
-	topic.toolMsgID = msgID
-	topic.toolMsgHTML = html
+const toolBufferTimeout = 3 * time.Second
+
+// bufferTool stores the completed tool call and starts a timer.
+// If the result arrives within 3s, tool+result render as one message.
+// If the timer fires first, the tool renders immediately (slow tool path).
+func (om *OutputManager) bufferTool(topic *TopicOutput) {
+	html, inputStr := buildToolHTML(topic.toolName, topic.toolInput)
+	name := topic.toolName
+
 	topic.currentMsgID = 0
 	topic.toolName = ""
 	topic.toolInput = ""
+
+	pt := &pendingTool{
+		name:     name,
+		inputStr: inputStr,
+		html:     html,
+	}
+	topic.pending = pt
+
+	pt.timer = time.AfterFunc(toolBufferTimeout, func() {
+		om.mu.Lock()
+		defer om.mu.Unlock()
+
+		// Timer fired — tool is slow, render it now
+		if topic.pending != pt {
+			return // already consumed by handleToolResult
+		}
+		topic.pending = nil
+
+		msgID, _ := om.sender.SendSync(topic.threadID, html, "HTML", nil)
+		topic.toolMsgID = msgID
+		topic.toolMsgHTML = html
+	})
 }
 
 func (om *OutputManager) splitMessage(topic *TopicOutput, text string) {
@@ -482,12 +529,12 @@ func (om *OutputManager) splitMessage(topic *TopicOutput, text string) {
 	rest := text[splitIdx:]
 
 	if topic.currentMsgID != 0 {
-		EditMessage(om.api, om.chatID, topic.currentMsgID, first, "", nil)
+		om.sender.Edit(topic.threadID, topic.currentMsgID, first, "", nil)
 	} else {
-		SendToThread(om.api, om.chatID, topic.threadID, first, "", nil)
+		om.sender.Send(topic.threadID, first, "", nil)
 	}
 
-	msgID, _ := SendToThread(om.api, om.chatID, topic.threadID, rest, "", nil)
+	msgID, _ := om.sender.SendSync(topic.threadID, rest, "", nil)
 	topic.currentMsgID = msgID
 	topic.textBuffer = rest
 	topic.lastEditTime = time.Now()

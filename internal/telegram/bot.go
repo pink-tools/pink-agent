@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -96,8 +97,10 @@ type Bot struct {
 	state   *state.Manager
 	claude  *claude.Manager
 	store   *store.FileStore
+	sender  *Sender
 	output  *OutputManager
-	batches map[int]*messageBatch
+	batches   map[int]*messageBatch
+	batchesMu sync.Mutex
 	dmSent map[int64]bool // chatID → already sent setup instructions
 }
 
@@ -107,17 +110,20 @@ func NewBot(token string, chatID int64, stateMgr *state.Manager, claudeMgr *clau
 		return nil, err
 	}
 
+	sender := NewSender(api, chatID)
+
 	b := &Bot{
 		api:         api,
 		chatID:      chatID,
 		state:       stateMgr,
 		claude:      claudeMgr,
 		store:       fileStore,
+		sender:      sender,
 		batches: make(map[int]*messageBatch),
 		dmSent:  make(map[int64]bool),
 	}
 
-	b.output = NewOutputManager(api, chatID)
+	b.output = NewOutputManager(api, chatID, sender)
 
 	return b, nil
 }
@@ -139,7 +145,7 @@ func (b *Bot) MigrateProjects(ctx context.Context) {
 		b.state.SetProjectThread(p.ID, threadID)
 		b.store.InitProject(p.ID)
 
-		SendToThread(b.api, b.chatID, threadID, "🦄 Pink Agent activated and ready to work.", "", nil)
+		b.sender.Send(threadID, "🦄 Pink Agent activated and ready to work.", "", nil)
 		log.Info(ctx, "migrated project", log.Attr{K: "project", V: p.Name}, log.Attr{K: "threadId", V: threadID})
 	}
 }
@@ -303,7 +309,7 @@ func (b *Bot) sendToClaude(ctx context.Context, threadID int, text string) {
 	if !b.claude.Alive(threadID) {
 		sessionID := project.SessionID
 		if err := b.spawnClaude(threadID, sessionID, nil); err != nil {
-			SendToThread(b.api, b.chatID, threadID, "Failed to start Claude: "+err.Error(), "", nil)
+			b.sender.Send(threadID, "Failed to start Claude: "+err.Error(), "", nil)
 			return
 		}
 		// Fresh session — inject project context
@@ -315,7 +321,7 @@ func (b *Bot) sendToClaude(ctx context.Context, threadID int, text string) {
 
 	if err := b.claude.Send(threadID, text); err != nil {
 		log.Error(ctx, "claude send failed", log.Attr{K: "error", V: err.Error()})
-		SendToThread(b.api, b.chatID, threadID, "Failed to send: "+err.Error(), "", nil)
+		b.sender.Send(threadID, "Failed to send: "+err.Error(), "", nil)
 	}
 }
 
@@ -358,13 +364,13 @@ func (b *Bot) restartSession(ctx context.Context, threadID int) {
 	b.claude.Stop(threadID)
 	b.output.Cleanup(threadID)
 
-	SendToThread(b.api, b.chatID, threadID,
+	b.sender.Send(threadID,
 		"⚠️ Context limit reached. This session is done — starting fresh.\n\n"+
 			"Your conversation history is gone. If you need something from the old session, forward the messages here.",
 		"", nil)
 
 	if err := b.spawnClaude(threadID, "", nil); err != nil {
-		SendToThread(b.api, b.chatID, threadID, "Failed to restart: "+err.Error(), "", nil)
+		b.sender.Send(threadID, "Failed to restart: "+err.Error(), "", nil)
 		return
 	}
 
@@ -397,12 +403,12 @@ func (b *Bot) handleTopicCreated(ctx context.Context, threadID int, name string,
 	// Spawn Claude
 	if err := b.spawnClaude(threadID, "", nil); err != nil {
 		log.Error(ctx, "spawn claude failed", log.Attr{K: "error", V: err.Error()})
-		SendToThread(b.api, b.chatID, threadID, "Failed to start Claude: "+err.Error(), "", nil)
+		b.sender.Send(threadID, "Failed to start Claude: "+err.Error(), "", nil)
 		return
 	}
 
 	// Confirm activation
-	SendToThread(b.api, b.chatID, threadID, "🦄 Pink Agent activated and ready to work.", "", nil)
+	b.sender.Send(threadID, "🦄 Pink Agent activated and ready to work.", "", nil)
 
 	// Send init prompt
 	initPrompt := buildInitPrompt(projectID, b.state, b.store)
@@ -423,12 +429,14 @@ func (b *Bot) handleTopicClosed(ctx context.Context, threadID int) {
 		return
 	}
 
+	b.batchesMu.Lock()
 	if batch, ok := b.batches[threadID]; ok {
 		if batch.timer != nil {
 			batch.timer.Stop()
 		}
 		delete(b.batches, threadID)
 	}
+	b.batchesMu.Unlock()
 	b.claude.Stop(threadID)
 	b.output.Cleanup(threadID)
 	b.store.DeleteProject(p.ID)
@@ -485,12 +493,14 @@ func (b *Bot) DeleteProject(projectID string) error {
 	}
 
 	if p.ThreadID != 0 {
+		b.batchesMu.Lock()
 		if batch, ok := b.batches[p.ThreadID]; ok {
 			if batch.timer != nil {
 				batch.timer.Stop()
 			}
 			delete(b.batches, p.ThreadID)
 		}
+		b.batchesMu.Unlock()
 		b.claude.Stop(p.ThreadID)
 		b.output.Cleanup(p.ThreadID)
 		DeleteForumTopic(b.api, b.chatID, p.ThreadID)
@@ -524,7 +534,7 @@ func (b *Bot) handleVoice(ctx context.Context, msg *ForumMessage) {
 	path, err := b.downloadFile(msg.Voice.FileID, "voice.ogg")
 	if err != nil {
 		SetReaction(b.api, b.chatID, msg.MessageID, "")
-		SendToThread(b.api, b.chatID, threadID, "Failed to download voice: "+err.Error(), "", nil)
+		b.sender.Send(threadID, "Failed to download voice: "+err.Error(), "", nil)
 		return
 	}
 	defer os.Remove(path)
@@ -532,12 +542,12 @@ func (b *Bot) handleVoice(ctx context.Context, msg *ForumMessage) {
 	text, err := transcribe(path)
 	if err != nil {
 		SetReaction(b.api, b.chatID, msg.MessageID, "")
-		SendToThread(b.api, b.chatID, threadID, "Transcription failed: "+err.Error(), "", nil)
+		b.sender.Send(threadID, "Transcription failed: "+err.Error(), "", nil)
 		return
 	}
 
 	// Show transcription in topic
-	SendToThread(b.api, b.chatID, threadID, "\U0001f3a4 "+text, "", nil)
+	b.sender.Send(threadID, "\U0001f3a4 "+text, "", nil)
 
 	// Switch to processing reaction
 	SendChatAction(b.api, b.chatID, threadID, "typing")
@@ -550,22 +560,17 @@ func (b *Bot) handleVoice(ctx context.Context, msg *ForumMessage) {
 func (b *Bot) addToBatch(ctx context.Context, msg *ForumMessage) {
 	threadID := msg.MessageThreadID
 
-	batch, ok := b.batches[threadID]
-	if !ok {
-		batch = &messageBatch{}
-		b.batches[threadID] = batch
-	}
-
-	// Download files
+	// Download files outside the lock — HTTP requests can be slow
+	var files []string
 	if len(msg.Photo) > 0 {
 		photo := msg.Photo[len(msg.Photo)-1]
 		if path, err := b.downloadFile(photo.FileID, "photo.jpg"); err == nil {
-			batch.files = append(batch.files, path)
+			files = append(files, path)
 		}
 	}
 	if msg.Document != nil {
 		if path, err := b.downloadFile(msg.Document.FileID, msg.Document.FileName); err == nil {
-			batch.files = append(batch.files, path)
+			files = append(files, path)
 		}
 	}
 	if msg.Video != nil {
@@ -574,7 +579,7 @@ func (b *Bot) addToBatch(ctx context.Context, msg *ForumMessage) {
 			filename = msg.Video.FileName
 		}
 		if path, err := b.downloadFile(msg.Video.FileID, filename); err == nil {
-			batch.files = append(batch.files, path)
+			files = append(files, path)
 		}
 	}
 	if msg.Audio != nil {
@@ -583,27 +588,37 @@ func (b *Bot) addToBatch(ctx context.Context, msg *ForumMessage) {
 			filename = msg.Audio.FileName
 		}
 		if path, err := b.downloadFile(msg.Audio.FileID, filename); err == nil {
-			batch.files = append(batch.files, path)
+			files = append(files, path)
 		}
 	}
 
+	b.batchesMu.Lock()
+	batch, ok := b.batches[threadID]
+	if !ok {
+		batch = &messageBatch{}
+		b.batches[threadID] = batch
+	}
+	batch.files = append(batch.files, files...)
 	batch.messages = append(batch.messages, msg)
 
-	// Reset timer
 	if batch.timer != nil {
 		batch.timer.Stop()
 	}
-	batch.timer = time.AfterFunc(1*time.Second, func() {
+	batch.timer = time.AfterFunc(2*time.Second, func() {
 		b.flushBatch(ctx, threadID)
 	})
+	b.batchesMu.Unlock()
 }
 
 func (b *Bot) flushBatch(ctx context.Context, threadID int) {
+	b.batchesMu.Lock()
 	batch, ok := b.batches[threadID]
 	if !ok {
+		b.batchesMu.Unlock()
 		return
 	}
 	delete(b.batches, threadID)
+	b.batchesMu.Unlock()
 
 	// Collect texts
 	var texts []string
@@ -640,12 +655,14 @@ func (b *Bot) flushBatch(ctx context.Context, threadID int) {
 }
 
 func (b *Bot) flushExistingBatch(ctx context.Context, threadID int) {
+	b.batchesMu.Lock()
 	batch, ok := b.batches[threadID]
+	if ok && batch.timer != nil {
+		batch.timer.Stop()
+	}
+	b.batchesMu.Unlock()
 	if !ok {
 		return
-	}
-	if batch.timer != nil {
-		batch.timer.Stop()
 	}
 	b.flushBatch(ctx, threadID)
 }
@@ -740,12 +757,12 @@ func (b *Bot) handleStoreCommand(threadID int) {
 
 	files, err := b.store.List(p.ID)
 	if err != nil {
-		SendToThread(b.api, b.chatID, threadID, "Failed to list files: "+err.Error(), "", nil)
+		b.sender.Send(threadID, "Failed to list files: "+err.Error(), "", nil)
 		return
 	}
 
 	if len(files) == 0 {
-		SendToThread(b.api, b.chatID, threadID, "No files in store.", "", nil)
+		b.sender.Send(threadID, "No files in store.", "", nil)
 		return
 	}
 
@@ -754,7 +771,7 @@ func (b *Bot) handleStoreCommand(threadID int) {
 	for _, f := range files {
 		sb.WriteString(fmt.Sprintf("<code>%s</code> (%d bytes)\n", escapeHTMLStr(f.Name), f.Size))
 	}
-	SendToThread(b.api, b.chatID, threadID, sb.String(), "HTML", nil)
+	b.sender.Send(threadID, sb.String(), "HTML", nil)
 }
 
 func escapeHTMLStr(s string) string {

@@ -52,12 +52,18 @@ Don't "see error and fix" - write test script, run 10/100 times, observe.
 
 Tests = knowing. Assumptions = guessing.
 
+### Never Silence Errors
+Errors must propagate. If a function returns error — handle it or return it.
+No empty catch. No log-and-continue. No "best effort".
+Failed? Crash. The caller will know about it.
+
 ### Never Use
 - Polling (events/blocking operations exist everywhere)
 - Timers/sleep (except actual delay needed by task)
 - Hardcoded paths/tokens/magic numbers
 - Retry logic
 - Workarounds
+- Silent error handling (catch-and-ignore, log-and-continue, `_ = err`)
 
 ### Git Commits
 
