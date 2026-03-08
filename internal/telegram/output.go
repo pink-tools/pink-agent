@@ -13,10 +13,7 @@ import (
 	"pink-agent/internal/render"
 )
 
-const (
-	maxMessageLen = 4096
-	editInterval  = 2 * time.Second
-)
+const maxMessageLen = 4096
 
 // pendingTool holds a buffered tool call waiting for its result.
 type pendingTool struct {
@@ -26,32 +23,28 @@ type pendingTool struct {
 	timer    *time.Timer
 }
 
-// TopicOutput tracks the streaming output state for one forum topic.
+// TopicOutput tracks the output state for one forum topic.
 type TopicOutput struct {
-	threadID     int
-	currentMsgID int       // content message being edited
-	thinkingMsg  int       // thinking indicator/content message
-	textBuffer   string    // accumulated text for current content block
-	blockType    string    // current content block type: "text", "thinking", "tool_use"
-	toolName     string    // tool name from content_block_start
-	toolInput    string    // accumulated tool input JSON
-	toolMsgID    int       // tool use message ID (for appending result)
-	toolMsgHTML  string    // tool use message HTML (for editing)
-	pending      *pendingTool // buffered tool call awaiting result
-	lastEditTime time.Time
-	editTimer    *time.Timer
+	threadID    int
+	textBuffer  string // accumulated text for current content block
+	blockType   string // current content block type: "text", "thinking", "tool_use"
+	toolName    string // tool name from content_block_start
+	toolInput   string // accumulated tool input JSON
+	toolMsgID   int    // tool use message ID (for appending result)
+	toolMsgHTML string // tool use message HTML (for editing)
+	pending     *pendingTool
 
-	thinkingBuffer   string // accumulated thinking text
-	lastInputTokens  int    // from latest message_delta (input + cache)
-	lastOutputTokens int    // from latest message_delta
-	contextWindow    int    // from result.modelUsage
+	thinkingBuffer   string
+	lastInputTokens  int
+	lastOutputTokens int
+	contextWindow    int
 	userMsgID        int    // user's message ID for clearing reaction
-	lastTextMsgID    int    // last rendered text message (for context prepend)
+	lastTextMsgID    int    // last rendered text message (for context append)
 	lastTextContent  string // its content
 	lastTextMode     string // parse mode ("HTML" or "")
 }
 
-// OutputManager manages streaming output for all topics.
+// OutputManager manages output for all topics.
 type OutputManager struct {
 	api    *tgbotapi.BotAPI
 	chatID int64
@@ -127,10 +120,7 @@ func (om *OutputManager) HandleEvent(threadID int, ev claude.OutputEvent) {
 
 		switch block.Delta.Type {
 		case "text_delta":
-			if topic.blockType == "text" {
-				topic.textBuffer += block.Delta.Text
-				om.scheduleEdit(topic)
-			}
+			topic.textBuffer += block.Delta.Text
 		case "thinking_delta":
 			topic.thinkingBuffer += block.Delta.Thinking
 		case "input_json_delta":
@@ -142,16 +132,14 @@ func (om *OutputManager) HandleEvent(threadID int, ev claude.OutputEvent) {
 		case "tool_use":
 			om.bufferTool(topic)
 		case "text":
-			if topic.textBuffer != "" {
-				om.renderFinalText(topic)
-			}
+			om.flushText(topic)
 		case "thinking":
 			om.renderThinking(topic)
 		}
 		topic.blockType = ""
 
 	case "message_start":
-		// No action needed — /stop command handles interruption
+		// No action needed
 
 	case "message_delta":
 		var msg struct {
@@ -196,8 +184,7 @@ func (om *OutputManager) HandleEvent(threadID int, ev claude.OutputEvent) {
 		om.handleToolResult(topic, ev)
 
 	case "assistant":
-		// With --include-partial-messages, streaming events handle output.
-		// Ignore complete assistant messages to avoid duplication.
+		// Streaming events handle output — ignore complete assistant messages.
 	}
 }
 
@@ -223,9 +210,6 @@ func (om *OutputManager) Cleanup(threadID int) {
 	defer om.mu.Unlock()
 
 	if topic, ok := om.topics[threadID]; ok {
-		if topic.editTimer != nil {
-			topic.editTimer.Stop()
-		}
 		if topic.pending != nil {
 			topic.pending.timer.Stop()
 		}
@@ -362,53 +346,8 @@ func (om *OutputManager) clearReaction(topic *TopicOutput) {
 	}
 }
 
-func (om *OutputManager) scheduleEdit(topic *TopicOutput) {
-	if topic.editTimer != nil {
-		return
-	}
-
-	if time.Since(topic.lastEditTime) >= editInterval {
-		om.doEdit(topic)
-		return
-	}
-
-	topic.editTimer = time.AfterFunc(editInterval, func() {
-		om.mu.Lock()
-		defer om.mu.Unlock()
-		topic.editTimer = nil
-		om.doEdit(topic)
-	})
-}
-
-func (om *OutputManager) doEdit(topic *TopicOutput) {
-	if topic.textBuffer == "" {
-		return
-	}
-
-	text := topic.textBuffer
-	if len(text) > maxMessageLen-100 {
-		om.splitMessage(topic, text)
-		return
-	}
-
-	topic.lastEditTime = time.Now()
-
-	if topic.currentMsgID == 0 {
-		msgID, err := om.sender.SendSync(topic.threadID, text, "", nil)
-		if err == nil {
-			topic.currentMsgID = msgID
-		}
-	} else {
-		om.sender.Edit(topic.threadID, topic.currentMsgID, text, "", nil)
-	}
-}
-
-func (om *OutputManager) renderFinalText(topic *TopicOutput) {
-	if topic.editTimer != nil {
-		topic.editTimer.Stop()
-		topic.editTimer = nil
-	}
-
+// flushText renders the accumulated text buffer as a complete message.
+func (om *OutputManager) flushText(topic *TopicOutput) {
 	text := topic.textBuffer
 	topic.textBuffer = ""
 
@@ -417,44 +356,12 @@ func (om *OutputManager) renderFinalText(topic *TopicOutput) {
 	}
 
 	html := render.Telegram(text)
-	chunks := splitHTML(html, maxMessageLen)
 
-	for i, chunk := range chunks {
-		if i == 0 && topic.currentMsgID != 0 {
-			err := om.sender.EditSync(topic.threadID, topic.currentMsgID, chunk, "HTML", nil)
-			if err != nil {
-				om.sender.Edit(topic.threadID, topic.currentMsgID, text, "", nil)
-				topic.lastTextMsgID = topic.currentMsgID
-				topic.lastTextContent = text
-				topic.lastTextMode = ""
-			} else {
-				topic.lastTextMsgID = topic.currentMsgID
-				topic.lastTextContent = chunk
-				topic.lastTextMode = "HTML"
-			}
-		} else {
-			msgID, _ := om.sender.SendSync(topic.threadID, chunk, "HTML", nil)
-			if i == 0 {
-				topic.currentMsgID = msgID
-			}
-			topic.lastTextMsgID = msgID
-			topic.lastTextContent = chunk
-			topic.lastTextMode = "HTML"
-		}
-	}
-
-	topic.currentMsgID = 0
-}
-
-func (om *OutputManager) flushText(topic *TopicOutput) {
-	if topic.editTimer != nil {
-		topic.editTimer.Stop()
-		topic.editTimer = nil
-	}
-
-	if topic.textBuffer != "" {
-		om.renderFinalText(topic)
-	}
+	// Sender handles chunking, but we need the last msgID for context append
+	msgID, _ := om.sender.SendSync(topic.threadID, html, "HTML", nil)
+	topic.lastTextMsgID = msgID
+	topic.lastTextContent = html
+	topic.lastTextMode = "HTML"
 }
 
 // buildToolHTML builds the blockquote HTML for a tool call.
@@ -495,7 +402,6 @@ func (om *OutputManager) bufferTool(topic *TopicOutput) {
 	html, inputStr := buildToolHTML(topic.toolName, topic.toolInput)
 	name := topic.toolName
 
-	topic.currentMsgID = 0
 	topic.toolName = ""
 	topic.toolInput = ""
 
@@ -520,24 +426,6 @@ func (om *OutputManager) bufferTool(topic *TopicOutput) {
 		topic.toolMsgID = msgID
 		topic.toolMsgHTML = html
 	})
-}
-
-func (om *OutputManager) splitMessage(topic *TopicOutput, text string) {
-	splitIdx := findSplitPoint(text, maxMessageLen-200)
-
-	first := text[:splitIdx]
-	rest := text[splitIdx:]
-
-	if topic.currentMsgID != 0 {
-		om.sender.Edit(topic.threadID, topic.currentMsgID, first, "", nil)
-	} else {
-		om.sender.Send(topic.threadID, first, "", nil)
-	}
-
-	msgID, _ := om.sender.SendSync(topic.threadID, rest, "", nil)
-	topic.currentMsgID = msgID
-	topic.textBuffer = rest
-	topic.lastEditTime = time.Now()
 }
 
 func splitHTML(html string, maxLen int) []string {
