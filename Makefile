@@ -6,3 +6,6 @@ build:
 
 install: build
 	cp pink-agent $(INSTALL_DIR)/pink-agent
+
+setup:
+	git config core.hooksPath .githooks

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -18,6 +19,9 @@ import (
 	"pink-agent/internal/store"
 	"pink-agent/internal/telegram"
 )
+
+//go:embed context.md
+var claudeContext string
 
 var version = "dev"
 
@@ -37,6 +41,7 @@ func main() {
 	cfg := core.Config{
 		Name:    serviceName,
 		Version: version,
+		Context: claudeContext,
 		Usage: fmt.Sprintf(`pink-agent v%s - Telegram bot for Claude Code
 
 Usage:
@@ -246,7 +251,7 @@ func runDaemon(ctx context.Context, dataDir string, d *atomic.Pointer[daemon]) e
 	defer claudeMgr.StopAll()
 
 	// Initialize Telegram bot
-	bot, err := telegram.NewBot(cfg.TelegramBotToken, cfg.TelegramGroupID, stateMgr, claudeMgr, fileStore)
+	bot, err := telegram.NewBot(cfg.TelegramBotToken, cfg.TelegramGroupID, stateMgr, claudeMgr, fileStore, claudeContext)
 	if err != nil {
 		return fmt.Errorf("create telegram bot: %w", err)
 	}

@@ -5,7 +5,7 @@ go 1.25.4
 require (
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/google/uuid v1.6.0
-	github.com/pink-tools/pink-core v1.21.0
+	github.com/pink-tools/pink-core v1.22.0
 	github.com/yuin/goldmark v1.7.16
 )
 

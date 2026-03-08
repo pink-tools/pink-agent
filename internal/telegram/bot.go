@@ -18,6 +18,7 @@ import (
 	"github.com/pink-tools/pink-core/log"
 
 	"pink-agent/internal/claude"
+	agentcontext "pink-agent/internal/context"
 	"pink-agent/internal/state"
 	"pink-agent/internal/store"
 )
@@ -92,19 +93,20 @@ type TGAudio struct {
 }
 
 type Bot struct {
-	api     *tgbotapi.BotAPI
-	chatID  int64
-	state   *state.Manager
-	claude  *claude.Manager
-	store   *store.FileStore
-	sender  *Sender
-	output  *OutputManager
-	batches   map[int]*messageBatch
-	batchesMu sync.Mutex
-	dmSent map[int64]bool // chatID → already sent setup instructions
+	api          *tgbotapi.BotAPI
+	chatID       int64
+	state        *state.Manager
+	claude       *claude.Manager
+	store        *store.FileStore
+	sender       *Sender
+	output       *OutputManager
+	agentContext string // assembled context for init prompts
+	batches      map[int]*messageBatch
+	batchesMu    sync.Mutex
+	dmSent       map[int64]bool // chatID → already sent setup instructions
 }
 
-func NewBot(token string, chatID int64, stateMgr *state.Manager, claudeMgr *claude.Manager, fileStore *store.FileStore) (*Bot, error) {
+func NewBot(token string, chatID int64, stateMgr *state.Manager, claudeMgr *claude.Manager, fileStore *store.FileStore, embeddedContext string) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, err
@@ -113,14 +115,15 @@ func NewBot(token string, chatID int64, stateMgr *state.Manager, claudeMgr *clau
 	sender := NewSender(api, chatID)
 
 	b := &Bot{
-		api:         api,
-		chatID:      chatID,
-		state:       stateMgr,
-		claude:      claudeMgr,
-		store:       fileStore,
-		sender:      sender,
-		batches: make(map[int]*messageBatch),
-		dmSent:  make(map[int64]bool),
+		api:          api,
+		chatID:       chatID,
+		state:        stateMgr,
+		claude:       claudeMgr,
+		store:        fileStore,
+		sender:       sender,
+		agentContext: agentcontext.Build(embeddedContext),
+		batches:      make(map[int]*messageBatch),
+		dmSent:       make(map[int64]bool),
 	}
 
 	b.output = NewOutputManager(api, chatID, sender)
@@ -314,7 +317,7 @@ func (b *Bot) sendToClaude(ctx context.Context, threadID int, text string) {
 		}
 		// Fresh session — inject project context
 		if sessionID == "" {
-			initPrompt := buildInitPrompt(project.ID, b.state, b.store)
+			initPrompt := b.buildInitPrompt(project.ID)
 			b.claude.Send(threadID, initPrompt)
 		}
 	}
@@ -374,7 +377,7 @@ func (b *Bot) restartSession(ctx context.Context, threadID int) {
 		return
 	}
 
-	prompt := buildRestartPrompt(p.ID, b.state, b.store)
+	prompt := b.buildRestartPrompt(p.ID)
 	b.claude.Send(threadID, prompt)
 
 	log.Info(ctx, "session restarted (context limit)", log.Attr{K: "project", V: p.Name})
@@ -411,7 +414,7 @@ func (b *Bot) handleTopicCreated(ctx context.Context, threadID int, name string,
 	b.sender.Send(threadID, "🦄 Pink Agent activated and ready to work.", "", nil)
 
 	// Send init prompt
-	initPrompt := buildInitPrompt(projectID, b.state, b.store)
+	initPrompt := b.buildInitPrompt(projectID)
 	if err := b.claude.Send(threadID, initPrompt); err != nil {
 		log.Error(ctx, "init send failed", log.Attr{K: "error", V: err.Error()})
 	}
@@ -471,7 +474,7 @@ func (b *Bot) CreateProject(name, prompt, dir string) (*CreateProjectResult, err
 		return nil, fmt.Errorf("spawn claude: %w", err)
 	}
 
-	initPrompt := buildInitPrompt(projectID, b.state, b.store)
+	initPrompt := b.buildInitPrompt(projectID)
 	b.claude.Send(threadID, initPrompt)
 
 	if prompt != "" {
@@ -692,47 +695,42 @@ func (b *Bot) downloadFile(fileID, filename string) (string, error) {
 	return path, err
 }
 
-func buildInitPrompt(projectID string, stateMgr *state.Manager, fs *store.FileStore) string {
-	claudeMd := filepath.Join(core.HomeDir(), "pink-tools", ".claude", "CLAUDE.md")
-
+func (b *Bot) buildInitPrompt(projectID string) string {
 	var parts []string
 	parts = append(parts, "New Pink Agent session.")
 
 	if projectID != "" {
-		if p := stateMgr.GetProject(projectID); p != nil {
+		if p := b.state.GetProject(projectID); p != nil {
 			parts = append(parts, fmt.Sprintf("Project: %s.", p.Name))
 		}
 	}
 
-	parts = append(parts, fmt.Sprintf("Read configuration: %s. Then wait for instructions.", claudeMd))
+	parts = append(parts, fmt.Sprintf("\n\n%s\n\nWait for instructions.", b.agentContext))
 
 	return strings.Join(parts, " ")
 }
 
-func buildRestartPrompt(projectID string, stateMgr *state.Manager, fs *store.FileStore) string {
-	claudeMd := filepath.Join(core.HomeDir(), "pink-tools", ".claude", "CLAUDE.md")
-
+func (b *Bot) buildRestartPrompt(projectID string) string {
 	var parts []string
 	parts = append(parts, "Session restarted (context limit).")
 
 	if projectID != "" {
-		if p := stateMgr.GetProject(projectID); p != nil {
+		if p := b.state.GetProject(projectID); p != nil {
 			parts = append(parts, fmt.Sprintf("Project: %s.", p.Name))
 		}
 
-		if ctx := readProjectContext(fs, projectID); ctx != "" {
+		if ctx := readProjectContext(b.store, projectID); ctx != "" {
 			parts = append(parts, fmt.Sprintf("\nProject context:\n%s\n", ctx))
 		}
 	}
 
-	parts = append(parts, fmt.Sprintf("Read configuration: %s. Then wait for instructions.", claudeMd))
+	parts = append(parts, fmt.Sprintf("\n\n%s\n\nWait for instructions.", b.agentContext))
 
 	return strings.Join(parts, " ")
 }
 
-func buildAttachPrompt() string {
-	claudeMd := filepath.Join(core.HomeDir(), "pink-tools", ".claude", "CLAUDE.md")
-	return fmt.Sprintf("Continuing a Desktop session via pink-agent. Output now streams to Telegram. Read configuration: %s. Confirm you're ready to continue.", claudeMd)
+func (b *Bot) buildAttachPrompt() string {
+	return fmt.Sprintf("Continuing a Desktop session via pink-agent. Output now streams to Telegram.\n\n%s\n\nConfirm you're ready to continue.", b.agentContext)
 }
 
 // readProjectContext reads PROJECT.md from store, returns empty string if missing or placeholder.
@@ -824,7 +822,7 @@ func (b *Bot) AttachSession(sessionID, dir, name string) (*AttachSessionResult, 
 		return nil, fmt.Errorf("spawn claude: %w", err)
 	}
 
-	b.claude.Send(threadID, buildAttachPrompt())
+	b.claude.Send(threadID, b.buildAttachPrompt())
 
 	return &AttachSessionResult{
 		ID:       projectID,
