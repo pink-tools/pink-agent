@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/pink-tools/pink-core/log"
 
 	"pink-agent/internal/claude"
 	"pink-agent/internal/render"
@@ -93,7 +95,10 @@ func (om *OutputManager) HandleEvent(threadID int, ev claude.OutputEvent) {
 				Input json.RawMessage `json:"input,omitempty"`
 			} `json:"content_block"`
 		}
-		json.Unmarshal(ev.Raw, &block)
+		if err := json.Unmarshal(ev.Raw, &block); err != nil {
+			log.Warn(context.Background(), "unmarshal content_block_start failed", log.Attr{K: "error", V: err.Error()}, log.Attr{K: "raw", V: string(ev.Raw)})
+			return
+		}
 		topic.blockType = block.ContentBlock.Type
 		topic.toolName = block.ContentBlock.Name
 
@@ -116,7 +121,10 @@ func (om *OutputManager) HandleEvent(threadID int, ev claude.OutputEvent) {
 				PartialJSON string `json:"partial_json,omitempty"`
 			} `json:"delta"`
 		}
-		json.Unmarshal(ev.Raw, &block)
+		if err := json.Unmarshal(ev.Raw, &block); err != nil {
+			log.Warn(context.Background(), "unmarshal content_block_delta failed", log.Attr{K: "error", V: err.Error()}, log.Attr{K: "raw", V: string(ev.Raw)})
+			return
+		}
 
 		switch block.Delta.Type {
 		case "text_delta":
@@ -150,7 +158,10 @@ func (om *OutputManager) HandleEvent(threadID int, ev claude.OutputEvent) {
 				OutputTokens             int `json:"output_tokens"`
 			} `json:"usage"`
 		}
-		json.Unmarshal(ev.Raw, &msg)
+		if err := json.Unmarshal(ev.Raw, &msg); err != nil {
+			log.Warn(context.Background(), "unmarshal message_delta failed", log.Attr{K: "error", V: err.Error()}, log.Attr{K: "raw", V: string(ev.Raw)})
+			return
+		}
 		u := msg.Usage
 		topic.lastInputTokens = u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 		topic.lastOutputTokens = u.OutputTokens
@@ -165,7 +176,10 @@ func (om *OutputManager) HandleEvent(threadID int, ev claude.OutputEvent) {
 				ContextWindow int `json:"contextWindow"`
 			} `json:"modelUsage"`
 		}
-		json.Unmarshal(ev.Raw, &res)
+		if err := json.Unmarshal(ev.Raw, &res); err != nil {
+			log.Warn(context.Background(), "unmarshal result failed", log.Attr{K: "error", V: err.Error()}, log.Attr{K: "raw", V: string(ev.Raw)})
+			return
+		}
 
 		for _, mu := range res.ModelUsage {
 			topic.contextWindow = mu.ContextWindow

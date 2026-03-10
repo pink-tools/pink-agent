@@ -105,9 +105,12 @@ Don't "see error and fix" - write test script, run 10/100 times, observe.
 Tests = knowing. Assumptions = guessing.
 
 ### Never Silence Errors
-Errors must propagate. If a function returns error — handle it or return it.
-No empty catch. No log-and-continue. No "best effort".
-Failed? Crash. The caller will know about it.
+Every error must be visible. No exceptions.
+
+If a function can fail — let it crash. Propagate the error up or kill the process.
+Never swallow, never log-and-continue, never discard a return value.
+An unhandled edge case that crashes is better than a silent failure that corrupts state.
+Acceptable to skip: temp file cleanup on shutdown, TCP response writes to disconnected clients, cosmetic UI calls (typing indicators, reactions).
 
 ### Never Use
 - Polling (events/blocking operations exist everywhere)
@@ -115,7 +118,7 @@ Failed? Crash. The caller will know about it.
 - Hardcoded paths/tokens/magic numbers
 - Retry logic
 - Workarounds
-- Silent error handling (catch-and-ignore, log-and-continue, `_ = err`)
+- Discarded error returns
 
 ### Git Commits
 

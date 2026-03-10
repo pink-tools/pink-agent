@@ -68,7 +68,9 @@ func sendText(token string, chatID int64, threadID int, text string) error {
 		OK          bool   `json:"ok"`
 		Description string `json:"description"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
 	if !result.OK {
 		return fmt.Errorf("telegram: %s", result.Description)
 	}
@@ -108,7 +110,9 @@ func sendFile(token string, chatID int64, threadID int, path string) error {
 		OK          bool   `json:"ok"`
 		Description string `json:"description"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
 	if !result.OK {
 		return fmt.Errorf("telegram: %s", result.Description)
 	}

@@ -95,6 +95,7 @@ type TGAudio struct {
 type Bot struct {
 	api          *tgbotapi.BotAPI
 	chatID       int64
+	ctx          context.Context // lifecycle context from Start loop
 	state        *state.Manager
 	claude       *claude.Manager
 	store        *store.FileStore
@@ -131,29 +132,8 @@ func NewBot(token string, chatID int64, stateMgr *state.Manager, claudeMgr *clau
 	return b, nil
 }
 
-// MigrateProjects creates forum topics for all projects that don't have one.
-func (b *Bot) MigrateProjects(ctx context.Context) {
-	for _, p := range b.state.State().Projects {
-		if p.ThreadID != 0 {
-			continue
-		}
-
-		threadID, err := CreateForumTopic(b.api, b.chatID, p.Name)
-		if err != nil {
-			log.Error(ctx, "migrate: create topic failed",
-				log.Attr{K: "project", V: p.Name}, log.Attr{K: "error", V: err.Error()})
-			continue
-		}
-
-		b.state.SetProjectThread(p.ID, threadID)
-		b.store.InitProject(p.ID)
-
-		b.sender.Send(threadID, "🦄 Pink Agent activated and ready to work.", "", nil)
-		log.Info(ctx, "migrated project", log.Attr{K: "project", V: p.Name}, log.Attr{K: "threadId", V: threadID})
-	}
-}
-
 func (b *Bot) Start(ctx context.Context) {
+	b.ctx = ctx
 	SetBotCommands(b.api, b.chatID)
 	log.Info(ctx, "telegram bot started", log.Attr{K: "username", V: b.api.Self.UserName})
 
@@ -353,7 +333,7 @@ func (b *Bot) spawnClaude(threadID int, sessionID string, extraEnv []string) err
 
 		// Detect context limit
 		if ev.Type == "result" && ev.IsError && ev.Result == "Prompt is too long" {
-			go b.restartSession(context.Background(), threadID)
+			go b.restartSession(b.ctx, threadID)
 		}
 	})
 }
@@ -395,7 +375,7 @@ func (b *Bot) handleTopicCreated(ctx context.Context, threadID int, name string,
 	}
 
 	// Create project and link to this thread
-	projectID, err := b.state.CreateProject(name, "")
+	projectID, err := b.state.CreateProject(name, core.HomeDir())
 	if err != nil {
 		log.Error(ctx, "create project failed", log.Attr{K: "error", V: err.Error()})
 		return
@@ -475,10 +455,14 @@ func (b *Bot) CreateProject(name, prompt, dir string) (*CreateProjectResult, err
 	}
 
 	initPrompt := b.buildInitPrompt(projectID)
-	b.claude.Send(threadID, initPrompt)
+	if err := b.claude.Send(threadID, initPrompt); err != nil {
+		return nil, fmt.Errorf("send init prompt: %w", err)
+	}
 
 	if prompt != "" {
-		b.claude.Send(threadID, prompt)
+		if err := b.claude.Send(threadID, prompt); err != nil {
+			return nil, fmt.Errorf("send prompt: %w", err)
+		}
 	}
 
 	return &CreateProjectResult{
@@ -822,7 +806,9 @@ func (b *Bot) AttachSession(sessionID, dir, name string) (*AttachSessionResult, 
 		return nil, fmt.Errorf("spawn claude: %w", err)
 	}
 
-	b.claude.Send(threadID, b.buildAttachPrompt())
+	if err := b.claude.Send(threadID, b.buildAttachPrompt()); err != nil {
+		return nil, fmt.Errorf("send attach prompt: %w", err)
+	}
 
 	return &AttachSessionResult{
 		ID:       projectID,

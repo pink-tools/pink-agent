@@ -3,7 +3,6 @@ package state
 import (
 	"encoding/json"
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -18,7 +17,7 @@ type Project struct {
 	Name      string `json:"name"`
 	ThreadID  int    `json:"threadId,omitempty"`
 	SessionID string `json:"sessionId,omitempty"`
-	Dir       string `json:"dir,omitempty"`
+	Dir       string `json:"dir"`
 }
 
 type State struct {
@@ -268,147 +267,4 @@ func (m *Manager) ClearProjectThread(id string) error {
 	})
 }
 
-// Migrate handles legacy formats. Returns project IDs that need forum topics created.
-func Migrate(dataDir string, m *Manager) []string {
-	orphaned := migrateOldFormat(dataDir, m)
-	migrateTopics(dataDir, m)
-	return orphaned
-}
-
-// migrateTopics reads the old state format with topics[] and merges them into projects.
-func migrateTopics(dataDir string, m *Manager) {
-	path := filepath.Join(dataDir, "state.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-
-	var old struct {
-		Topics []struct {
-			ThreadID  int    `json:"threadId"`
-			ProjectID string `json:"projectId"`
-			SessionID string `json:"sessionId"`
-		} `json:"topics"`
-	}
-	if err := json.Unmarshal(data, &old); err != nil || len(old.Topics) == 0 {
-		return
-	}
-
-	for _, t := range old.Topics {
-		if t.ProjectID == "" || t.ThreadID == 0 {
-			continue
-		}
-		p := m.GetProject(t.ProjectID)
-		if p == nil || p.ThreadID != 0 {
-			continue
-		}
-		m.SetProjectThread(t.ProjectID, t.ThreadID)
-		if t.SessionID != "" {
-			m.SetProjectSession(t.ProjectID, t.SessionID)
-		}
-	}
-}
-
-// migrateOldFormat handles the origin/main state format with activeProject and sessions.
-// Projects are already loaded by Storage.Load() (Go drops unknown fields).
-// Returns project IDs that need forum topics created.
-func migrateOldFormat(dataDir string, m *Manager) []string {
-	path := filepath.Join(dataDir, "state.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-
-	var old struct {
-		ActiveProject string `json:"activeProject"`
-		Projects      []struct {
-			ID            string `json:"id"`
-			Name          string `json:"name"`
-			ActiveSession string `json:"activeSession"`
-			Sessions      []struct {
-				ClaudeID string `json:"claudeId"`
-				Name     string `json:"name"`
-			} `json:"sessions"`
-		} `json:"projects"`
-	}
-	if err := json.Unmarshal(data, &old); err != nil || old.ActiveProject == "" {
-		return nil // Not old format
-	}
-
-	storeDir := filepath.Join(dataDir, "store")
-	var orphaned []string
-
-	for _, op := range old.Projects {
-		if op.ID == "" {
-			continue
-		}
-		p := m.GetProject(op.ID)
-		if p == nil || p.ThreadID != 0 {
-			continue
-		}
-
-		if len(op.Sessions) == 0 {
-			orphaned = append(orphaned, op.ID)
-			continue
-		}
-
-		// Active session keeps the original project
-		keepIdx := 0
-		for i, sess := range op.Sessions {
-			if sess.ClaudeID == op.ActiveSession {
-				keepIdx = i
-				break
-			}
-		}
-		m.SetProjectSession(op.ID, op.Sessions[keepIdx].ClaudeID)
-		orphaned = append(orphaned, op.ID)
-
-		// Create new projects for remaining sessions
-		for i, sess := range op.Sessions {
-			if i == keepIdx {
-				continue
-			}
-			name := op.Name
-			if sess.Name != "" {
-				name = op.Name + " — " + sess.Name
-			}
-			newID, err := m.CreateProject(name, "")
-			if err != nil {
-				continue
-			}
-			m.SetProjectSession(newID, sess.ClaudeID)
-			copyStoreFiles(storeDir, op.ID, newID)
-			orphaned = append(orphaned, newID)
-		}
-	}
-
-	// Re-save in new format (drops activeProject, sessions, cols, rows)
-	m.storage.Save(m.State())
-
-	return orphaned
-}
-
-func copyStoreFiles(storeDir, srcProjectID, dstProjectID string) {
-	srcDir := filepath.Join(storeDir, srcProjectID)
-	dstDir := filepath.Join(storeDir, dstProjectID)
-
-	if _, err := os.Stat(srcDir); err != nil {
-		return
-	}
-
-	filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		relPath, _ := filepath.Rel(srcDir, path)
-		dstPath := filepath.Join(dstDir, relPath)
-		os.MkdirAll(filepath.Dir(dstPath), 0755)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		os.WriteFile(dstPath, data, 0644)
-		return nil
-	})
-}
 
