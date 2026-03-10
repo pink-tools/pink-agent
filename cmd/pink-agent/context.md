@@ -105,12 +105,8 @@ Don't "see error and fix" - write test script, run 10/100 times, observe.
 Tests = knowing. Assumptions = guessing.
 
 ### Never Silence Errors
-Every error must be visible. No exceptions.
-
-If a function can fail — let it crash. Propagate the error up or kill the process.
-Never swallow, never log-and-continue, never discard a return value.
-An unhandled edge case that crashes is better than a silent failure that corrupts state.
-Acceptable to skip: temp file cleanup on shutdown, TCP response writes to disconnected clients, cosmetic UI calls (typing indicators, reactions).
+Every error must be visible. Never swallow, never discard.
+An unhandled crash is better than a silent failure.
 
 ### Never Use
 - Polling (events/blocking operations exist everywhere)
