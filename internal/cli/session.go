@@ -139,7 +139,7 @@ func sessionAttach(sessionID, dir string) error {
 		return fmt.Errorf("parse response: %w", err)
 	}
 
-	fmt.Printf("Attached session %s to topic \"%s\"\n", sessionID[:8], result.Name)
+	fmt.Printf("Attached session %s to topic \"%s\"\n", sessionID, result.Name)
 	return nil
 }
 

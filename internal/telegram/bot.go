@@ -692,7 +692,7 @@ func (b *Bot) downloadFile(fileID, filename string) (string, error) {
 
 	ext := filepath.Ext(filename)
 	base := strings.TrimSuffix(filename, ext)
-	path := filepath.Join(os.TempDir(), fmt.Sprintf("%s-%s%s", base, fileID[:8], ext))
+	path := filepath.Join(os.TempDir(), fmt.Sprintf("%s-%s%s", base, fileID, ext))
 	out, err := os.Create(path)
 	if err != nil {
 		return "", err

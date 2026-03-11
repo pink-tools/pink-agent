@@ -59,12 +59,12 @@ func projectList() error {
 	}
 
 	for _, p := range state.Projects {
-		line := fmt.Sprintf("  %s (%s)", p.Name, p.ID[:8])
+		line := fmt.Sprintf("  %s (%s)", p.Name, p.ID)
 		if p.ThreadID != 0 {
 			line += fmt.Sprintf(" thread:%d", p.ThreadID)
 		}
 		if p.SessionID != "" {
-			line += fmt.Sprintf(" session:%s", p.SessionID[:8])
+			line += fmt.Sprintf(" session:%s", p.SessionID)
 		}
 		fmt.Println(line)
 	}
@@ -106,7 +106,7 @@ func projectCreate(args []string) error {
 		return fmt.Errorf("parse response: %w", err)
 	}
 
-	fmt.Printf("Created project \"%s\" (%s)\n", result.Name, result.ID[:8])
+	fmt.Printf("Created project \"%s\" (%s)\n", result.Name, result.ID)
 	return nil
 }
 

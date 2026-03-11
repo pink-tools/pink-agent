@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -58,35 +57,16 @@ func HandleStore(args []string) error {
 	}
 }
 
-func resolveProjectID(name string) (string, error) {
+func resolveProjectID(nameOrID string) (string, error) {
 	// -p flag takes priority over env var
-	if name == "" {
+	if nameOrID == "" {
 		if id := os.Getenv("PINK_PROJECT_ID"); id != "" {
 			return id, nil
 		}
 		return "", fmt.Errorf("PINK_PROJECT_ID not set and no -p flag provided")
 	}
 
-	response, err := core.SendCommand(serviceName, "getState")
-	if err != nil {
-		return "", fmt.Errorf("agent not running")
-	}
-	if strings.HasPrefix(response, "ERROR:") {
-		return "", fmt.Errorf("%s", strings.TrimPrefix(response, "ERROR:"))
-	}
-
-	var state cliState
-	if err := json.Unmarshal([]byte(response), &state); err != nil {
-		return "", fmt.Errorf("parse state: %w", err)
-	}
-
-	nameLower := strings.ToLower(name)
-	for _, p := range state.Projects {
-		if strings.ToLower(p.Name) == nameLower {
-			return p.ID, nil
-		}
-	}
-	return "", fmt.Errorf("project not found: %s", name)
+	return resolveProjectByArg(nameOrID)
 }
 
 func storeList(fs *store.FileStore, projectID string) error {
