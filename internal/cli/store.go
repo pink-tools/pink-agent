@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,12 +127,24 @@ func storeAdd(fs *store.FileStore, projectID string, args []string) error {
 		filtered = append(filtered, a)
 	}
 
-	if len(filtered) < 2 {
+	if len(filtered) < 1 {
 		return fmt.Errorf("usage: pink-agent store add [--force] <path> <content>")
 	}
 
 	path := filtered[0]
-	content := strings.Join(filtered[1:], " ")
+
+	var content string
+	if info, err := os.Stdin.Stat(); err == nil && info.Mode()&os.ModeCharDevice == 0 {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return fmt.Errorf("read stdin: %w", err)
+		}
+		content = strings.TrimSpace(string(data))
+	} else if len(filtered) >= 2 {
+		content = strings.Join(filtered[1:], " ")
+	} else {
+		return fmt.Errorf("usage: pink-agent store add [--force] <path> <content>")
+	}
 
 	// Check if file exists (unless --force)
 	if !force {
