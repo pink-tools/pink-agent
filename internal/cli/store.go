@@ -59,13 +59,11 @@ func HandleStore(args []string) error {
 }
 
 func resolveProjectID(name string) (string, error) {
-	// Env var first
-	if id := os.Getenv("PINK_PROJECT_ID"); id != "" {
-		return id, nil
-	}
-
-	// Fallback: -p flag with project name lookup
+	// -p flag takes priority over env var
 	if name == "" {
+		if id := os.Getenv("PINK_PROJECT_ID"); id != "" {
+			return id, nil
+		}
 		return "", fmt.Errorf("PINK_PROJECT_ID not set and no -p flag provided")
 	}
 
