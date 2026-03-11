@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -54,6 +55,7 @@ Usage:
   pink-agent store list|get|add|delete Manage project files
   pink-agent send "text"              Send text to topic
   pink-agent send -f <file>           Send file to topic
+  pink-agent refresh                  Restart session fresh
   pink-agent session list <dir>       List sessions from directory
   pink-agent session attach <id> <dir> Attach session as new topic
   pink-agent --version                Show version
@@ -96,6 +98,10 @@ Usage:
 			"session": {
 				Desc: "Session management (list, attach)",
 				Run:  cli.HandleSession,
+			},
+			"refresh": {
+				Desc: "Restart session fresh with project context",
+				Run:  cli.HandleRefresh,
 			},
 		},
 		IPCHandler: func(cmd string) string {
@@ -174,6 +180,20 @@ Usage:
 					return "ERROR:" + err.Error()
 				}
 				if err := dm.bot.DeleteProject(req.ID); err != nil {
+					return "ERROR:" + err.Error()
+				}
+				return "OK"
+
+			case "refresh":
+				dm := d.Load()
+				if dm == nil {
+					return "ERROR:daemon not ready"
+				}
+				threadID, err := strconv.Atoi(payload)
+				if err != nil {
+					return "ERROR:invalid thread ID"
+				}
+				if err := dm.bot.RefreshSession(threadID); err != nil {
 					return "ERROR:" + err.Error()
 				}
 				return "OK"

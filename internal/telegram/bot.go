@@ -338,6 +338,30 @@ func (b *Bot) spawnClaude(threadID int, sessionID string, extraEnv []string) err
 	})
 }
 
+// RefreshSession restarts the Claude session fresh with project context.
+func (b *Bot) RefreshSession(threadID int) error {
+	p := b.state.GetProjectByThread(threadID)
+	if p == nil {
+		return fmt.Errorf("no project for thread %d", threadID)
+	}
+
+	b.claude.Stop(threadID)
+	b.output.Cleanup(threadID)
+
+	b.sender.Send(threadID, "Session refreshed — starting fresh.", "", nil)
+
+	if err := b.spawnClaude(threadID, "", nil); err != nil {
+		b.sender.Send(threadID, "Failed to restart: "+err.Error(), "", nil)
+		return err
+	}
+
+	prompt := b.buildRestartPrompt(p.ID)
+	b.claude.Send(threadID, prompt)
+
+	log.Info(b.ctx, "session refreshed", log.Attr{K: "project", V: p.Name})
+	return nil
+}
+
 func (b *Bot) restartSession(ctx context.Context, threadID int) {
 	p := b.state.GetProjectByThread(threadID)
 	if p == nil {
