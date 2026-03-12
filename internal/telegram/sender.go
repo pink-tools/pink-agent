@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -144,46 +145,48 @@ func (s *Sender) worker(threadID int, q chan *sendOp) {
 }
 
 func (s *Sender) doSend(op *sendOp) (int, error) {
-	msgID, err := SendToThread(s.api, s.chatID, op.threadID, op.text, op.parseMode, op.markup)
-	if err == nil {
-		return msgID, nil
-	}
+	for {
+		msgID, err := SendToThread(s.api, s.chatID, op.threadID, op.text, op.parseMode, op.markup)
+		if err == nil {
+			return msgID, nil
+		}
 
-	// can't parse entities → retry as plaintext
-	if op.parseMode != "" && isParseError(err) {
-		return SendToThread(s.api, s.chatID, op.threadID, stripHTML(op.text), "", op.markup)
-	}
+		if op.parseMode != "" && isParseError(err) {
+			return SendToThread(s.api, s.chatID, op.threadID, stripHTML(op.text), "", op.markup)
+		}
 
-	// 429 Too Many Requests → wait retry_after
-	if wait := retryAfter(err); wait > 0 {
-		time.Sleep(wait)
-		return SendToThread(s.api, s.chatID, op.threadID, op.text, op.parseMode, op.markup)
-	}
+		if wait := retryAfter(err); wait > 0 {
+			time.Sleep(wait)
+			continue
+		}
 
-	return 0, err
+		return 0, err
+	}
 }
 
 func (s *Sender) doEditOp(op *sendOp) error {
-	err := EditMessage(s.api, s.chatID, op.msgID, op.text, op.parseMode, op.markup)
-	if err == nil {
-		return nil
-	}
+	for {
+		err := EditMessage(s.api, s.chatID, op.msgID, op.text, op.parseMode, op.markup)
+		if err == nil {
+			return nil
+		}
 
-	if op.parseMode != "" && isParseError(err) {
-		return EditMessage(s.api, s.chatID, op.msgID, stripHTML(op.text), "", op.markup)
-	}
+		if op.parseMode != "" && isParseError(err) {
+			return EditMessage(s.api, s.chatID, op.msgID, stripHTML(op.text), "", op.markup)
+		}
 
-	if wait := retryAfter(err); wait > 0 {
-		time.Sleep(wait)
-		return EditMessage(s.api, s.chatID, op.msgID, op.text, op.parseMode, op.markup)
-	}
+		if wait := retryAfter(err); wait > 0 {
+			time.Sleep(wait)
+			continue
+		}
 
-	return err
+		return err
+	}
 }
 
-// chunk proactively splits text into ≤4096-char pieces.
+// chunk proactively splits text into ≤4096-rune pieces.
 func (s *Sender) chunk(text string, parseMode string) []string {
-	if len(text) <= maxMessageLen {
+	if utf8.RuneCountInString(text) <= maxMessageLen {
 		return []string{text}
 	}
 
@@ -194,14 +197,14 @@ func (s *Sender) chunk(text string, parseMode string) []string {
 	return chunkPlain(text, maxMessageLen)
 }
 
-func chunkPlain(text string, maxLen int) []string {
+func chunkPlain(text string, maxRunes int) []string {
 	var chunks []string
 	for len(text) > 0 {
-		if len(text) <= maxLen {
+		if utf8.RuneCountInString(text) <= maxRunes {
 			chunks = append(chunks, text)
 			break
 		}
-		idx := findSplitPoint(text, maxLen)
+		idx := findSplitPoint(text, maxRunes)
 		chunks = append(chunks, text[:idx])
 		text = text[idx:]
 	}
@@ -210,16 +213,16 @@ func chunkPlain(text string, maxLen int) []string {
 
 // chunkHTML splits HTML text respecting open tags.
 // At each split point, closes open tags and reopens them in the next chunk.
-func chunkHTML(html string, maxLen int) []string {
+func chunkHTML(html string, maxRunes int) []string {
 	var chunks []string
 
 	for len(html) > 0 {
-		if len(html) <= maxLen {
+		if utf8.RuneCountInString(html) <= maxRunes {
 			chunks = append(chunks, html)
 			break
 		}
 
-		splitIdx := findSplitPoint(html, maxLen-100) // reserve room for closing/opening tags
+		splitIdx := findSplitPoint(html, maxRunes-100) // reserve room for closing/opening tags
 		openTags := findOpenTags(html[:splitIdx])
 
 		// Close open tags at split point

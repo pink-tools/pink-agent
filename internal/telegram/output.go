@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/pink-tools/pink-core/log"
@@ -256,8 +257,8 @@ func (om *OutputManager) renderThinking(topic *TopicOutput) {
 	}
 
 	text := topic.thinkingBuffer
-	if len(text) > 3800 {
-		text = text[:3800] + "..."
+	if runes := []rune(text); len(runes) > 3800 {
+		text = string(runes[:3800]) + "..."
 	}
 
 	html := fmt.Sprintf("<blockquote expandable>\U0001f4ad <i>%s</i></blockquote>", escapeHTMLStr(text))
@@ -285,8 +286,8 @@ func (om *OutputManager) handleToolResult(topic *TopicOutput, ev claude.OutputEv
 		}
 
 		content := c.Content
-		if len(content) > 3800 {
-			content = content[:3800] + "..."
+		if runes := []rune(content); len(runes) > 3800 {
+			content = string(runes[:3800]) + "..."
 		}
 
 		var prefix string
@@ -394,8 +395,8 @@ func buildToolHTML(name, inputJSON string) (html, inputStr string) {
 		}
 	}
 
-	if len(inputStr) > 3800 {
-		inputStr = inputStr[:3800] + "..."
+	if runes := []rune(inputStr); len(runes) > 3800 {
+		inputStr = string(runes[:3800]) + "..."
 	}
 
 	if inputStr != "" {
@@ -442,8 +443,8 @@ func (om *OutputManager) bufferTool(topic *TopicOutput) {
 	})
 }
 
-func splitHTML(html string, maxLen int) []string {
-	if len(html) <= maxLen {
+func splitHTML(html string, maxRunes int) []string {
+	if utf8.RuneCountInString(html) <= maxRunes {
 		return []string{html}
 	}
 
@@ -451,12 +452,12 @@ func splitHTML(html string, maxLen int) []string {
 	remaining := html
 
 	for len(remaining) > 0 {
-		if len(remaining) <= maxLen {
+		if utf8.RuneCountInString(remaining) <= maxRunes {
 			chunks = append(chunks, remaining)
 			break
 		}
 
-		splitIdx := findSplitPoint(remaining, maxLen)
+		splitIdx := findSplitPoint(remaining, maxRunes)
 		chunks = append(chunks, remaining[:splitIdx])
 		remaining = remaining[splitIdx:]
 	}
@@ -464,18 +465,29 @@ func splitHTML(html string, maxLen int) []string {
 	return chunks
 }
 
-func findSplitPoint(text string, maxLen int) int {
-	if len(text) <= maxLen {
+func findSplitPoint(text string, maxRunes int) int {
+	if utf8.RuneCountInString(text) <= maxRunes {
 		return len(text)
 	}
 
-	if idx := strings.LastIndex(text[:maxLen], "\n\n"); idx > maxLen/2 {
+	// Convert maxRunes to byte index
+	byteIdx := 0
+	for i := 0; i < maxRunes && byteIdx < len(text); i++ {
+		_, size := utf8.DecodeRuneInString(text[byteIdx:])
+		byteIdx += size
+	}
+
+	if idx := strings.LastIndex(text[:byteIdx], "\n\n"); idx > byteIdx/2 {
 		return idx + 2
 	}
 
-	if idx := strings.LastIndex(text[:maxLen], "\n"); idx > maxLen/2 {
+	if idx := strings.LastIndex(text[:byteIdx], "\n"); idx > byteIdx/2 {
 		return idx + 1
 	}
 
-	return maxLen
+	if idx := strings.LastIndex(text[:byteIdx], " "); idx > byteIdx/2 {
+		return idx + 1
+	}
+
+	return byteIdx
 }
