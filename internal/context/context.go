@@ -48,31 +48,45 @@ func Build(ownContext string) string {
 
 // discoverServices returns names of installed pink-tools services.
 func discoverServices() []string {
+	var names []string
+
 	// Try orchestrator --services first
 	orchBin := core.BinaryPath("pink-orchestrator")
 	if out, err := exec.Command(orchBin, "--services").Output(); err == nil {
-		var names []string
-		if json.Unmarshal(out, &names) == nil {
-			return names
+		json.Unmarshal(out, &names)
+	}
+
+	// If orchestrator didn't return results, scan ~/pink-tools/
+	if len(names) == 0 {
+		entries, err := os.ReadDir(core.PinkToolsDir())
+		if err != nil {
+			return nil
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			bin := filepath.Join(core.PinkToolsDir(), name, name)
+			if _, err := os.Stat(bin); err == nil {
+				names = append(names, name)
+			}
 		}
 	}
 
-	// Fallback: scan ~/pink-tools/ for binaries
-	entries, err := os.ReadDir(core.PinkToolsDir())
-	if err != nil {
-		return nil
+	// Always include orchestrator itself (not in --services list)
+	hasOrch := false
+	for _, n := range names {
+		if n == "pink-orchestrator" {
+			hasOrch = true
+			break
+		}
+	}
+	if !hasOrch {
+		if _, err := os.Stat(orchBin); err == nil {
+			names = append(names, "pink-orchestrator")
+		}
 	}
 
-	var names []string
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		bin := filepath.Join(core.PinkToolsDir(), name, name)
-		if _, err := os.Stat(bin); err == nil {
-			names = append(names, name)
-		}
-	}
 	return names
 }
