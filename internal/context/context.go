@@ -14,6 +14,9 @@ import (
 func Build(ownContext string) string {
 	var parts []string
 
+	// Tell Claude where pink-tools binaries live
+	parts = append(parts, "pink-tools binaries: "+core.PinkToolsDir()+"/<name>/<name>")
+
 	// Own embedded context (agent instructions + code rules)
 	if ownContext != "" {
 		parts = append(parts, strings.TrimSpace(ownContext))
