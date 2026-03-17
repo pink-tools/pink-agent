@@ -14,16 +14,18 @@ import (
 func Build(ownContext string) string {
 	var parts []string
 
-	// Tell Claude where pink-tools binaries live
-	parts = append(parts, "pink-tools binaries: "+core.PinkToolsDir()+"/<name>/<name>")
-
 	// Own embedded context (agent instructions + code rules)
 	if ownContext != "" {
-		parts = append(parts, strings.TrimSpace(ownContext))
+		ownBin := core.BinaryPath("pink-agent")
+		text := strings.TrimSpace(ownContext)
+		text = strings.ReplaceAll(text, "    pink-agent ", "    "+ownBin+" ")
+		text = strings.ReplaceAll(text, "    pink-agent\n", "    "+ownBin+"\n")
+		parts = append(parts, text)
 	}
 
 	// Collect context from installed services via --claude
-	for _, svc := range discoverServices() {
+	svcs := discoverServices()
+	for _, svc := range svcs {
 		bin := core.BinaryPath(svc)
 		if svc == "pink-agent" {
 			continue // skip self
@@ -34,6 +36,9 @@ func Build(ownContext string) string {
 		}
 		text := strings.TrimSpace(string(out))
 		if text != "" {
+			// Replace bare command names with absolute paths
+			text = strings.ReplaceAll(text, "    "+svc+" ", "    "+bin+" ")
+			text = strings.ReplaceAll(text, "    "+svc+"\n", "    "+bin+"\n")
 			parts = append(parts, text)
 		}
 	}
