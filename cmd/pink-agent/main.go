@@ -205,10 +205,10 @@ Usage:
 	}
 
 	actions := []core.Action{
-		{Name: "install", Label: "Install", Desc: "Initial setup"},
+		{Name: "setup", Label: "Setup", Desc: "Initial setup"},
 	}
 	handlers := map[string]core.ActionHandler{
-		"install": {Describe: describeInstall, Execute: executeInstall},
+		"setup": {Describe: describeInstall, Execute: executeInstall},
 	}
 	core.HandleActions(&cfg, actions, handlers)
 	core.Run(cfg, func(ctx context.Context) error {

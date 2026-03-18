@@ -155,7 +155,7 @@ func (p *Process) Stop() {
 
 	p.stdin.Close()
 
-	// Wait briefly for graceful exit, then kill
+	// Wait for graceful exit, then kill
 	done := make(chan struct{})
 	go func() {
 		p.cmd.Wait()
