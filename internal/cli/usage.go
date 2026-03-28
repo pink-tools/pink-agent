@@ -1,157 +1,36 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
-	"time"
+	"strings"
+
+	"github.com/pink-tools/pink-core"
+
+	"pink-agent/internal/usage"
 )
 
-type credentials struct {
-	ClaudeAiOauth struct {
-		AccessToken string `json:"accessToken"`
-	} `json:"claudeAiOauth"`
-}
-
-type usageResponse struct {
-	FiveHour *usageWindow `json:"five_hour"`
-	SevenDay *usageWindow `json:"seven_day"`
-}
-
-type usageWindow struct {
-	Utilization float64 `json:"utilization"`
-	ResetsAt    string  `json:"resets_at"`
-}
-
 func HandleUsage(args []string) error {
-	token, err := readOAuthToken()
-	if err != nil {
-		return fmt.Errorf("read oauth token: %w", err)
-	}
+	threadID := os.Getenv("PINK_THREAD_ID")
 
-	usage, err := fetchUsage(token)
-	if err != nil {
-		return fmt.Errorf("fetch usage: %w", err)
-	}
-
-	now := time.Now()
-
-	if usage.FiveHour != nil {
-		remaining := formatRemaining(usage.FiveHour.ResetsAt, now)
-		fmt.Printf("5h:      %.0f%% (resets in %s)\n", usage.FiveHour.Utilization, remaining)
-	}
-
-	if usage.SevenDay != nil {
-		remaining := formatRemaining(usage.SevenDay.ResetsAt, now)
-		fmt.Printf("weekly:  %.0f%% (resets in %s)\n", usage.SevenDay.Utilization, remaining)
-	}
-
-	return nil
-}
-
-func readOAuthToken() (string, error) {
-	if runtime.GOOS == "darwin" {
-		return readFromKeychain()
-	}
-	return readFromFile()
-}
-
-func readFromKeychain() (string, error) {
-	out, err := exec.Command("security", "find-generic-password", "-s", "Claude Code-credentials", "-w").Output()
-	if err != nil {
-		return "", fmt.Errorf("keychain read failed: %w", err)
-	}
-
-	var creds credentials
-	if err := json.Unmarshal(out, &creds); err != nil {
-		return "", fmt.Errorf("parse credentials: %w", err)
-	}
-
-	if creds.ClaudeAiOauth.AccessToken == "" {
-		return "", fmt.Errorf("no access token in credentials")
-	}
-
-	return creds.ClaudeAiOauth.AccessToken, nil
-}
-
-func readFromFile() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-
-	data, err := os.ReadFile(filepath.Join(home, ".claude", ".credentials.json"))
-	if err != nil {
-		return "", fmt.Errorf("read credentials file: %w", err)
-	}
-
-	var creds credentials
-	if err := json.Unmarshal(data, &creds); err != nil {
-		return "", fmt.Errorf("parse credentials: %w", err)
-	}
-
-	if creds.ClaudeAiOauth.AccessToken == "" {
-		return "", fmt.Errorf("no access token in credentials")
-	}
-
-	return creds.ClaudeAiOauth.AccessToken, nil
-}
-
-func fetchUsage(token string) (*usageResponse, error) {
-	req, err := http.NewRequest("GET", "https://api.anthropic.com/api/oauth/usage", nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("API returned %d", resp.StatusCode)
-	}
-
-	var usage usageResponse
-	if err := json.NewDecoder(resp.Body).Decode(&usage); err != nil {
-		return nil, fmt.Errorf("parse response: %w", err)
-	}
-
-	return &usage, nil
-}
-
-func formatRemaining(resetsAt string, now time.Time) string {
-	t, err := time.Parse(time.RFC3339, resetsAt)
-	if err != nil {
-		// Try with fractional seconds
-		t, err = time.Parse("2006-01-02T15:04:05.999999-07:00", resetsAt)
+	// Running inside a Claude session with daemon — send formatted message to topic
+	if threadID != "" && core.IsRunning(serviceName) {
+		response, err := core.SendCommand(serviceName, "usage:"+threadID)
 		if err != nil {
-			return resetsAt
+			return fmt.Errorf("agent not running")
 		}
+		if strings.HasPrefix(response, "ERROR:") {
+			return fmt.Errorf("%s", strings.TrimPrefix(response, "ERROR:"))
+		}
+		return nil
 	}
 
-	d := t.Sub(now)
-	if d <= 0 {
-		return "now"
+	// Standalone — print to stdout
+	u, err := usage.Fetch()
+	if err != nil {
+		return err
 	}
 
-	days := int(d.Hours()) / 24
-	hours := int(d.Hours()) % 24
-	minutes := int(d.Minutes()) % 60
-
-	if days > 0 {
-		return fmt.Sprintf("%dd %dh", days, hours)
-	}
-	if hours > 0 {
-		return fmt.Sprintf("%dh %dm", hours, minutes)
-	}
-	return fmt.Sprintf("%dm", minutes)
+	fmt.Print(usage.FormatText(u))
+	return nil
 }

@@ -203,6 +203,20 @@ Usage:
 				}
 				return "OK"
 
+			case "usage":
+				dm := d.Load()
+				if dm == nil {
+					return "ERROR:daemon not ready"
+				}
+				threadID, err := strconv.Atoi(payload)
+				if err != nil {
+					return "ERROR:invalid thread ID"
+				}
+				if err := dm.bot.SendUsage(threadID); err != nil {
+					return "ERROR:" + err.Error()
+				}
+				return "OK"
+
 			default:
 				return "UNKNOWN"
 			}

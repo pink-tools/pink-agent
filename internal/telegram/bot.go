@@ -21,6 +21,7 @@ import (
 	agentcontext "pink-agent/internal/context"
 	"pink-agent/internal/state"
 	"pink-agent/internal/store"
+	"pink-agent/internal/usage"
 )
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -802,6 +803,17 @@ func transcribe(audioPath string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// SendUsage fetches Claude plan usage and sends it to the topic.
+func (b *Bot) SendUsage(threadID int) error {
+	u, err := usage.Fetch()
+	if err != nil {
+		return err
+	}
+
+	b.sender.Send(threadID, usage.FormatHTML(u), "HTML", nil)
+	return nil
 }
 
 // AttachSessionResult is the response for CLI session attach.
