@@ -58,6 +58,7 @@ Usage:
   pink-agent refresh                  Restart session fresh
   pink-agent session list <dir>       List sessions from directory
   pink-agent session attach <id> <dir> Attach session as new topic
+  pink-agent usage                    Show Claude Code plan usage
   pink-agent --version                Show version
   pink-agent --help                   Show this help
 `, version),
@@ -102,6 +103,10 @@ Usage:
 			"refresh": {
 				Desc: "Restart session fresh with project context",
 				Run:  cli.HandleRefresh,
+			},
+			"usage": {
+				Desc: "Show Claude Code plan usage",
+				Run:  cli.HandleUsage,
 			},
 		},
 		IPCHandler: func(cmd string) string {

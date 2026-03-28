@@ -39,6 +39,7 @@ You are running as Claude Code via `claude -p` (NDJSON protocol), controlled by 
     pink-agent send -f <file>                         Send file to topic
     pink-agent session list <dir>                     List sessions from directory
     pink-agent session attach <id> <dir>              Attach session as new topic
+    pink-agent usage                                  Show Claude Code plan usage
     pink-agent --version                              Show version
     pink-agent --help                                 Show this help
 
