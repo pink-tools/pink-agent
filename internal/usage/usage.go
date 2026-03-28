@@ -78,13 +78,13 @@ func FormatHTML(u *Usage) string {
 	var s string
 
 	if u.FiveHour != nil {
-		s += fmt.Sprintf("<b>5h:</b> %.0f%% (resets in %s)\n", u.FiveHour.Utilization, formatRemaining(u.FiveHour.ResetsAt, now))
+		s += fmt.Sprintf("5h:     %3.0f%%  resets in %s\n", u.FiveHour.Utilization, formatRemaining(u.FiveHour.ResetsAt, now))
 	}
 	if u.SevenDay != nil {
-		s += fmt.Sprintf("<b>weekly:</b> %.0f%% (resets in %s)", u.SevenDay.Utilization, formatRemaining(u.SevenDay.ResetsAt, now))
+		s += fmt.Sprintf("weekly: %3.0f%%  resets in %s\n", u.SevenDay.Utilization, formatRemaining(u.SevenDay.ResetsAt, now))
 	}
 
-	return s
+	return "<pre>" + s + "</pre>"
 }
 
 func readOAuthToken() (string, error) {
