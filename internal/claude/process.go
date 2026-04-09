@@ -9,7 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
+	"time"
 
 	core "github.com/pink-tools/pink-core"
 	"github.com/pink-tools/pink-core/log"
@@ -22,6 +22,7 @@ type Process struct {
 
 	mu   sync.Mutex
 	dead bool
+	done chan struct{}
 }
 
 type EventHandler func(OutputEvent)
@@ -79,6 +80,7 @@ func Start(sessionID, mcpConfig, workDir string, extraEnv []string, onEvent Even
 		cmd:    cmd,
 		stdin:  stdin,
 		cancel: cancel,
+		done:   make(chan struct{}),
 	}
 
 	go p.readLoop(stdout, onEvent)
@@ -112,6 +114,7 @@ func (p *Process) waitLoop() {
 	p.mu.Lock()
 	p.dead = true
 	p.mu.Unlock()
+	close(p.done)
 }
 
 // Send writes a user message to the process stdin.
@@ -133,17 +136,19 @@ func (p *Process) Send(text string) error {
 	return err
 }
 
-// Interrupt sends SIGINT to the process.
+// Interrupt sends an interrupt signal to the process.
+// On Unix, sends SIGINT. On Windows, kills the process tree.
 func (p *Process) Interrupt() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.dead {
 		return
 	}
-	p.cmd.Process.Signal(syscall.SIGINT)
+	interruptProcess(p.cmd.Process)
 }
 
-// Stop closes stdin and kills the process.
+// Stop closes stdin and waits for the process to exit gracefully.
+// If it doesn't exit within 5 seconds, the process is killed.
 func (p *Process) Stop() {
 	p.mu.Lock()
 	dead := p.dead
@@ -155,17 +160,11 @@ func (p *Process) Stop() {
 
 	p.stdin.Close()
 
-	// Wait for graceful exit, then kill
-	done := make(chan struct{})
-	go func() {
-		p.cmd.Wait()
-		close(done)
-	}()
-
 	select {
-	case <-done:
-	default:
+	case <-p.done:
+	case <-time.After(5 * time.Second):
 		p.cancel()
+		<-p.done
 	}
 }
 
