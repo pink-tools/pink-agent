@@ -19,6 +19,7 @@ import (
 
 	"pink-agent/internal/claude"
 	agentcontext "pink-agent/internal/context"
+	"pink-agent/internal/schedule"
 	"pink-agent/internal/state"
 	"pink-agent/internal/store"
 	"pink-agent/internal/usage"
@@ -100,6 +101,7 @@ type Bot struct {
 	state        *state.Manager
 	claude       *claude.Manager
 	store        *store.FileStore
+	schedules    *schedule.Manager
 	sender       *Sender
 	output       *OutputManager
 	agentContext string // assembled context for init prompts
@@ -108,7 +110,7 @@ type Bot struct {
 	dmSent       map[int64]bool // chatID → already sent setup instructions
 }
 
-func NewBot(token string, chatID int64, stateMgr *state.Manager, claudeMgr *claude.Manager, fileStore *store.FileStore, embeddedContext string) (*Bot, error) {
+func NewBot(token string, chatID int64, stateMgr *state.Manager, claudeMgr *claude.Manager, fileStore *store.FileStore, scheduleMgr *schedule.Manager, embeddedContext string) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, err
@@ -122,6 +124,7 @@ func NewBot(token string, chatID int64, stateMgr *state.Manager, claudeMgr *clau
 		state:        stateMgr,
 		claude:       claudeMgr,
 		store:        fileStore,
+		schedules:    scheduleMgr,
 		sender:       sender,
 		agentContext: agentcontext.Build(embeddedContext),
 		batches:      make(map[int]*messageBatch),
@@ -447,6 +450,7 @@ func (b *Bot) handleTopicClosed(ctx context.Context, threadID int) {
 	b.batchesMu.Unlock()
 	b.claude.Stop(threadID)
 	b.output.Cleanup(threadID)
+	b.schedules.CancelByProject(p.ID)
 	b.store.DeleteProject(p.ID)
 	b.state.DeleteProject(p.ID)
 	DeleteForumTopic(b.api, b.chatID, threadID)
@@ -518,6 +522,7 @@ func (b *Bot) DeleteProject(projectID string) error {
 		DeleteForumTopic(b.api, b.chatID, p.ThreadID)
 	}
 
+	b.schedules.CancelByProject(projectID)
 	b.store.DeleteProject(projectID)
 	return b.state.DeleteProject(projectID)
 }
@@ -803,6 +808,17 @@ func transcribe(audioPath string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// TriggerSchedule fires a scheduled prompt into a thread's session.
+func (b *Bot) TriggerSchedule(s schedule.Schedule) {
+	if b.state.GetProjectByThread(s.ThreadID) == nil {
+		return
+	}
+	wrapped := fmt.Sprintf("[SCHEDULE TRIGGER queued %s]\n\n%s",
+		time.Unix(s.CreatedAt, 0).UTC().Format(time.RFC3339), s.Prompt)
+	SendChatAction(b.api, b.chatID, s.ThreadID, "typing")
+	b.sendToClaude(b.ctx, s.ThreadID, wrapped)
 }
 
 // SendUsage fetches Claude plan usage and sends it to the topic.

@@ -16,6 +16,7 @@ import (
 	"pink-agent/internal/cli"
 	"pink-agent/internal/claude"
 	"pink-agent/internal/config"
+	"pink-agent/internal/schedule"
 	"pink-agent/internal/state"
 	"pink-agent/internal/store"
 	"pink-agent/internal/telegram"
@@ -29,8 +30,9 @@ var version = "dev"
 const serviceName = "pink-agent"
 
 type daemon struct {
-	bot   *telegram.Bot
-	state *state.Manager
+	bot       *telegram.Bot
+	state     *state.Manager
+	schedules *schedule.Manager
 }
 
 func main() {
@@ -58,6 +60,8 @@ Usage:
   pink-agent refresh                  Restart session fresh
   pink-agent session list <dir>       List sessions from directory
   pink-agent session attach <id> <dir> Attach session as new topic
+  pink-agent schedule <when> "text"   Schedule a self-trigger (1h, 30m, RFC3339)
+  pink-agent schedule list|cancel|help Manage schedules
   pink-agent usage                    Show Claude Code plan usage
   pink-agent --version                Show version
   pink-agent --help                   Show this help
@@ -103,6 +107,10 @@ Usage:
 			"refresh": {
 				Desc: "Restart session fresh with project context",
 				Run:  cli.HandleRefresh,
+			},
+			"schedule": {
+				Desc: "Schedule a self-trigger (add/list/cancel/help)",
+				Run:  cli.HandleSchedule,
 			},
 			"usage": {
 				Desc: "Show Claude Code plan usage",
@@ -217,6 +225,66 @@ Usage:
 				}
 				return "OK"
 
+			case "addSchedule":
+				dm := d.Load()
+				if dm == nil {
+					return "ERROR:daemon not ready"
+				}
+				var req struct {
+					ProjectID string `json:"projectId"`
+					ThreadID  int    `json:"threadId"`
+					When      string `json:"when"`
+					Prompt    string `json:"prompt"`
+				}
+				if err := json.Unmarshal([]byte(payload), &req); err != nil {
+					return "ERROR:" + err.Error()
+				}
+				s, err := dm.schedules.Add(req.ProjectID, req.ThreadID, req.When, req.Prompt)
+				if err != nil {
+					return "ERROR:" + err.Error()
+				}
+				data, _ := json.Marshal(s)
+				return string(data)
+
+			case "listSchedules":
+				dm := d.Load()
+				if dm == nil {
+					return "ERROR:daemon not ready"
+				}
+				var list []schedule.Schedule
+				if payload == "*" {
+					list = dm.schedules.List()
+				} else {
+					list = dm.schedules.ListByProject(payload)
+				}
+				data, _ := json.Marshal(list)
+				return string(data)
+
+			case "cancelSchedule":
+				dm := d.Load()
+				if dm == nil {
+					return "ERROR:daemon not ready"
+				}
+				var req struct {
+					ID        string `json:"id"`
+					ProjectID string `json:"projectId"`
+					All       bool   `json:"all"`
+				}
+				if err := json.Unmarshal([]byte(payload), &req); err != nil {
+					return "ERROR:" + err.Error()
+				}
+				if req.All {
+					n, err := dm.schedules.CancelByProject(req.ProjectID)
+					if err != nil {
+						return "ERROR:" + err.Error()
+					}
+					return strconv.Itoa(n)
+				}
+				if err := dm.schedules.Cancel(req.ID); err != nil {
+					return "ERROR:" + err.Error()
+				}
+				return "OK"
+
 			default:
 				return "UNKNOWN"
 			}
@@ -286,13 +354,23 @@ func runDaemon(ctx context.Context, dataDir string, d *atomic.Pointer[daemon]) e
 	claudeMgr := claude.NewManager(mcpConfig)
 	defer claudeMgr.StopAll()
 
+	// Initialize schedule manager
+	scheduleStorage := schedule.NewStorage(filepath.Join(dataDir, "schedules.json"))
+	scheduleMgr, err := schedule.NewManager(scheduleStorage)
+	if err != nil {
+		return fmt.Errorf("load schedules: %w", err)
+	}
+	defer scheduleMgr.Close()
+
 	// Initialize Telegram bot
-	bot, err := telegram.NewBot(cfg.TelegramBotToken, cfg.TelegramGroupID, stateMgr, claudeMgr, fileStore, claudeContext)
+	bot, err := telegram.NewBot(cfg.TelegramBotToken, cfg.TelegramGroupID, stateMgr, claudeMgr, fileStore, scheduleMgr, claudeContext)
 	if err != nil {
 		return fmt.Errorf("create telegram bot: %w", err)
 	}
 
-	d.Store(&daemon{bot: bot, state: stateMgr})
+	d.Store(&daemon{bot: bot, state: stateMgr, schedules: scheduleMgr})
+
+	scheduleMgr.Run(bot.TriggerSchedule)
 
 	log.Info(ctx, "ready")
 
