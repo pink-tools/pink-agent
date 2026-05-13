@@ -16,10 +16,7 @@ import (
 	"pink-agent/internal/render"
 )
 
-const (
-	maxMessageLen       = 4096
-	draftStreamInterval = 200 * time.Millisecond
-)
+const maxMessageLen = 4096
 
 // pendingTool holds a buffered tool call waiting for its result.
 type pendingTool struct {
@@ -48,10 +45,6 @@ type TopicOutput struct {
 	lastTextMsgID    int    // last rendered text message (for context append)
 	lastTextContent  string // its content
 	lastTextMode     string // parse mode ("HTML" or "")
-	draftID          string    // active streaming draft id (empty = no draft)
-	lastDraftAt      time.Time // throttle anchor for draft updates
-	blockIndex       int       // counter for unique draft ids per block
-	draftTooLong     bool      // current block already overflowed; stop streaming
 }
 
 // OutputManager manages output for all topics.
@@ -122,10 +115,6 @@ func (om *OutputManager) HandleEvent(threadID int, ev claude.OutputEvent) {
 			topic.thinkingBuffer = ""
 		case "text":
 			topic.textBuffer = ""
-			topic.blockIndex++
-			topic.draftID = fmt.Sprintf("pink-%d-%d", topic.threadID, topic.blockIndex)
-			topic.lastDraftAt = time.Time{}
-			topic.draftTooLong = false
 		case "tool_use":
 			om.flushText(topic)
 			topic.toolInput = ""
@@ -148,7 +137,6 @@ func (om *OutputManager) HandleEvent(threadID int, ev claude.OutputEvent) {
 		switch block.Delta.Type {
 		case "text_delta":
 			topic.textBuffer += block.Delta.Text
-			om.streamDraft(topic)
 		case "thinking_delta":
 			topic.thinkingBuffer += block.Delta.Thinking
 		case "input_json_delta":
@@ -384,8 +372,6 @@ func (om *OutputManager) clearReaction(topic *TopicOutput) {
 func (om *OutputManager) flushText(topic *TopicOutput) {
 	text := topic.textBuffer
 	topic.textBuffer = ""
-	topic.draftID = ""
-	topic.draftTooLong = false
 
 	if text == "" {
 		return
@@ -398,27 +384,6 @@ func (om *OutputManager) flushText(topic *TopicOutput) {
 	topic.lastTextMsgID = msgID
 	topic.lastTextContent = html
 	topic.lastTextMode = "HTML"
-}
-
-// streamDraft pushes a throttled sendMessageDraft for the current text block.
-// Drafts with the same draftID animate in-place; flushText finalizes via sendMessage.
-func (om *OutputManager) streamDraft(topic *TopicOutput) {
-	if topic.draftID == "" || topic.draftTooLong {
-		return
-	}
-	now := time.Now()
-	if now.Sub(topic.lastDraftAt) < draftStreamInterval {
-		return
-	}
-
-	html := render.Telegram(topic.textBuffer)
-	if utf8.RuneCountInString(html) > maxMessageLen {
-		topic.draftTooLong = true
-		return
-	}
-
-	topic.lastDraftAt = now
-	om.sender.SendDraft(topic.threadID, topic.draftID, html, "HTML")
 }
 
 // buildToolHTML builds the blockquote HTML for a tool call.

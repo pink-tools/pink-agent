@@ -18,14 +18,12 @@ type opKind int
 const (
 	opSend opKind = iota
 	opEdit
-	opDraft
 )
 
 type sendOp struct {
 	kind      opKind
 	threadID  int
 	msgID     int
-	draftID   string
 	text      string
 	parseMode string
 	markup    any
@@ -72,18 +70,6 @@ func (s *Sender) Send(threadID int, text, parseMode string, markup any) {
 			markup:    markup,
 		})
 	}
-}
-
-// SendDraft enqueues a streaming draft update. Fire-and-forget.
-// Drafts with the same draftID animate in-place; finalize by calling Send.
-func (s *Sender) SendDraft(threadID int, draftID, text, parseMode string) {
-	s.enqueue(&sendOp{
-		kind:      opDraft,
-		threadID:  threadID,
-		draftID:   draftID,
-		text:      text,
-		parseMode: parseMode,
-	})
 }
 
 // Edit enqueues a message edit for async delivery. Fire-and-forget.
@@ -159,8 +145,6 @@ func (s *Sender) worker(threadID int, q chan *sendOp) {
 			res.msgID, res.err = s.doSend(op)
 		case opEdit:
 			res.err = s.doEditOp(op)
-		case opDraft:
-			res.err = s.doDraft(op)
 		}
 		if op.result != nil {
 			op.result <- res
@@ -209,35 +193,6 @@ func (s *Sender) doEditOp(op *sendOp) error {
 			continue
 		}
 
-		return err
-	}
-}
-
-func (s *Sender) doDraft(op *sendOp) error {
-	p := &bot.SendMessageDraftParams{
-		ChatID:          s.chatID,
-		MessageThreadID: op.threadID,
-		DraftID:         op.draftID,
-		Text:            op.text,
-	}
-	if op.parseMode != "" {
-		p.ParseMode = models.ParseMode(op.parseMode)
-	}
-	for {
-		_, err := s.api.SendMessageDraft(s.ctx, p)
-		if err == nil {
-			return nil
-		}
-		if op.parseMode != "" && isParseError(err) {
-			p.Text = stripHTML(op.text)
-			p.ParseMode = ""
-			_, err := s.api.SendMessageDraft(s.ctx, p)
-			return err
-		}
-		if wait := retryAfter(err); wait > 0 {
-			time.Sleep(wait)
-			continue
-		}
 		return err
 	}
 }
