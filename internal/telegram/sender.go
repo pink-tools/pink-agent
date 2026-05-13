@@ -1,15 +1,16 @@
 package telegram
 
 import (
-	"encoding/json"
-	"fmt"
+	"context"
+	"errors"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
 )
 
 type opKind int
@@ -17,12 +18,14 @@ type opKind int
 const (
 	opSend opKind = iota
 	opEdit
+	opDraft
 )
 
 type sendOp struct {
 	kind      opKind
 	threadID  int
 	msgID     int
+	draftID   string
 	text      string
 	parseMode string
 	markup    any
@@ -37,18 +40,25 @@ type sendResult struct {
 // Sender provides reliable message delivery with per-thread FIFO queues,
 // proactive chunking, HTML fallback, and 429 handling.
 type Sender struct {
-	api    *tgbotapi.BotAPI
+	api    *bot.Bot
 	chatID int64
+	ctx    context.Context
 	mu     sync.Mutex
 	queues map[int]chan *sendOp
 }
 
-func NewSender(api *tgbotapi.BotAPI, chatID int64) *Sender {
+func NewSender(api *bot.Bot, chatID int64) *Sender {
 	return &Sender{
 		api:    api,
 		chatID: chatID,
+		ctx:    context.Background(),
 		queues: make(map[int]chan *sendOp),
 	}
+}
+
+// SetContext installs the bot's lifecycle context so per-call requests cancel on shutdown.
+func (s *Sender) SetContext(ctx context.Context) {
+	s.ctx = ctx
 }
 
 // Send enqueues a message for async delivery. Fire-and-forget.
@@ -62,6 +72,18 @@ func (s *Sender) Send(threadID int, text, parseMode string, markup any) {
 			markup:    markup,
 		})
 	}
+}
+
+// SendDraft enqueues a streaming draft update. Fire-and-forget.
+// Drafts with the same draftID animate in-place; finalize by calling Send.
+func (s *Sender) SendDraft(threadID int, draftID, text, parseMode string) {
+	s.enqueue(&sendOp{
+		kind:      opDraft,
+		threadID:  threadID,
+		draftID:   draftID,
+		text:      text,
+		parseMode: parseMode,
+	})
 }
 
 // Edit enqueues a message edit for async delivery. Fire-and-forget.
@@ -137,6 +159,8 @@ func (s *Sender) worker(threadID int, q chan *sendOp) {
 			res.msgID, res.err = s.doSend(op)
 		case opEdit:
 			res.err = s.doEditOp(op)
+		case opDraft:
+			res.err = s.doDraft(op)
 		}
 		if op.result != nil {
 			op.result <- res
@@ -146,13 +170,17 @@ func (s *Sender) worker(threadID int, q chan *sendOp) {
 
 func (s *Sender) doSend(op *sendOp) (int, error) {
 	for {
-		msgID, err := SendToThread(s.api, s.chatID, op.threadID, op.text, op.parseMode, op.markup)
+		msg, err := s.api.SendMessage(s.ctx, s.sendParams(op.threadID, op.text, op.parseMode, op.markup))
 		if err == nil {
-			return msgID, nil
+			return msg.ID, nil
 		}
 
 		if op.parseMode != "" && isParseError(err) {
-			return SendToThread(s.api, s.chatID, op.threadID, stripHTML(op.text), "", op.markup)
+			msg, err := s.api.SendMessage(s.ctx, s.sendParams(op.threadID, stripHTML(op.text), "", op.markup))
+			if err != nil {
+				return 0, err
+			}
+			return msg.ID, nil
 		}
 
 		if wait := retryAfter(err); wait > 0 {
@@ -166,13 +194,14 @@ func (s *Sender) doSend(op *sendOp) (int, error) {
 
 func (s *Sender) doEditOp(op *sendOp) error {
 	for {
-		err := EditMessage(s.api, s.chatID, op.msgID, op.text, op.parseMode, op.markup)
+		_, err := s.api.EditMessageText(s.ctx, s.editParams(op.msgID, op.text, op.parseMode, op.markup))
 		if err == nil {
 			return nil
 		}
 
 		if op.parseMode != "" && isParseError(err) {
-			return EditMessage(s.api, s.chatID, op.msgID, stripHTML(op.text), "", op.markup)
+			_, err := s.api.EditMessageText(s.ctx, s.editParams(op.msgID, stripHTML(op.text), "", op.markup))
+			return err
 		}
 
 		if wait := retryAfter(err); wait > 0 {
@@ -182,6 +211,65 @@ func (s *Sender) doEditOp(op *sendOp) error {
 
 		return err
 	}
+}
+
+func (s *Sender) doDraft(op *sendOp) error {
+	p := &bot.SendMessageDraftParams{
+		ChatID:          s.chatID,
+		MessageThreadID: op.threadID,
+		DraftID:         op.draftID,
+		Text:            op.text,
+	}
+	if op.parseMode != "" {
+		p.ParseMode = models.ParseMode(op.parseMode)
+	}
+	for {
+		_, err := s.api.SendMessageDraft(s.ctx, p)
+		if err == nil {
+			return nil
+		}
+		if op.parseMode != "" && isParseError(err) {
+			p.Text = stripHTML(op.text)
+			p.ParseMode = ""
+			_, err := s.api.SendMessageDraft(s.ctx, p)
+			return err
+		}
+		if wait := retryAfter(err); wait > 0 {
+			time.Sleep(wait)
+			continue
+		}
+		return err
+	}
+}
+
+func (s *Sender) sendParams(threadID int, text, parseMode string, markup any) *bot.SendMessageParams {
+	p := &bot.SendMessageParams{
+		ChatID:          s.chatID,
+		MessageThreadID: threadID,
+		Text:            text,
+	}
+	if parseMode != "" {
+		p.ParseMode = models.ParseMode(parseMode)
+	}
+	if rm, ok := markup.(models.ReplyMarkup); ok && rm != nil {
+		p.ReplyMarkup = rm
+	}
+	return p
+}
+
+func (s *Sender) editParams(msgID int, text, parseMode string, markup any) *bot.EditMessageTextParams {
+	p := &bot.EditMessageTextParams{
+		ChatID:    s.chatID,
+		MessageID: msgID,
+		Text:      text,
+	}
+	if parseMode != "" {
+		p.ParseMode = models.ParseMode(parseMode)
+	}
+	if rm, ok := markup.(models.ReplyMarkup); ok && rm != nil {
+		p.ReplyMarkup = rm
+	}
+	return p
 }
 
 // chunk proactively splits text into ≤4096-rune pieces.
@@ -300,31 +388,14 @@ func isParseError(err error) bool {
 }
 
 func retryAfter(err error) time.Duration {
-	s := err.Error()
-	if !strings.Contains(s, "Too Many Requests") && !strings.Contains(s, "retry after") {
-		return 0
-	}
-	// Try to extract retry_after from Telegram API error
-	// Format: "Too Many Requests: retry after N"
-	var apiErr struct {
-		Parameters struct {
-			RetryAfter int `json:"retry_after"`
-		} `json:"parameters"`
-	}
-	if json.Unmarshal([]byte(s), &apiErr) == nil && apiErr.Parameters.RetryAfter > 0 {
-		return time.Duration(apiErr.Parameters.RetryAfter) * time.Second
-	}
-	// Fallback: parse from error string
-	idx := strings.Index(s, "retry after ")
-	if idx >= 0 {
-		rest := s[idx+len("retry after "):]
-		var n int
-		fmt.Sscanf(rest, "%d", &n)
-		if n > 0 {
-			return time.Duration(n) * time.Second
+	var tmr *bot.TooManyRequestsError
+	if errors.As(err, &tmr) {
+		if tmr.RetryAfter > 0 {
+			return time.Duration(tmr.RetryAfter) * time.Second
 		}
+		return 5 * time.Second
 	}
-	return 5 * time.Second
+	return 0
 }
 
 func stripHTML(html string) string {

@@ -9,14 +9,17 @@ import (
 	"time"
 	"unicode/utf8"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/go-telegram/bot"
 	"github.com/pink-tools/pink-core/log"
 
 	"pink-agent/internal/claude"
 	"pink-agent/internal/render"
 )
 
-const maxMessageLen = 4096
+const (
+	maxMessageLen       = 4096
+	draftStreamInterval = 200 * time.Millisecond
+)
 
 // pendingTool holds a buffered tool call waiting for its result.
 type pendingTool struct {
@@ -45,24 +48,35 @@ type TopicOutput struct {
 	lastTextMsgID    int    // last rendered text message (for context append)
 	lastTextContent  string // its content
 	lastTextMode     string // parse mode ("HTML" or "")
+	draftID          string    // active streaming draft id (empty = no draft)
+	lastDraftAt      time.Time // throttle anchor for draft updates
+	blockIndex       int       // counter for unique draft ids per block
+	draftTooLong     bool      // current block already overflowed; stop streaming
 }
 
 // OutputManager manages output for all topics.
 type OutputManager struct {
-	api    *tgbotapi.BotAPI
+	api    *bot.Bot
 	chatID int64
+	ctx    context.Context
 	sender *Sender
 	topics map[int]*TopicOutput
 	mu     sync.Mutex
 }
 
-func NewOutputManager(api *tgbotapi.BotAPI, chatID int64, sender *Sender) *OutputManager {
+func NewOutputManager(api *bot.Bot, chatID int64, sender *Sender) *OutputManager {
 	return &OutputManager{
 		api:    api,
 		chatID: chatID,
+		ctx:    context.Background(),
 		sender: sender,
 		topics: make(map[int]*TopicOutput),
 	}
+}
+
+// SetContext installs the bot's lifecycle context for reaction calls.
+func (om *OutputManager) SetContext(ctx context.Context) {
+	om.ctx = ctx
 }
 
 // HandleEvent processes a claude output event for a topic.
@@ -108,6 +122,10 @@ func (om *OutputManager) HandleEvent(threadID int, ev claude.OutputEvent) {
 			topic.thinkingBuffer = ""
 		case "text":
 			topic.textBuffer = ""
+			topic.blockIndex++
+			topic.draftID = fmt.Sprintf("pink-%d-%d", topic.threadID, topic.blockIndex)
+			topic.lastDraftAt = time.Time{}
+			topic.draftTooLong = false
 		case "tool_use":
 			om.flushText(topic)
 			topic.toolInput = ""
@@ -130,6 +148,7 @@ func (om *OutputManager) HandleEvent(threadID int, ev claude.OutputEvent) {
 		switch block.Delta.Type {
 		case "text_delta":
 			topic.textBuffer += block.Delta.Text
+			om.streamDraft(topic)
 		case "thinking_delta":
 			topic.thinkingBuffer += block.Delta.Thinking
 		case "input_json_delta":
@@ -356,7 +375,7 @@ func (om *OutputManager) appendContext(topic *TopicOutput) {
 
 func (om *OutputManager) clearReaction(topic *TopicOutput) {
 	if topic.userMsgID != 0 {
-		SetReaction(om.api, om.chatID, topic.userMsgID, "")
+		SetReaction(om.ctx, om.api, om.chatID, topic.userMsgID, "")
 		topic.userMsgID = 0
 	}
 }
@@ -365,6 +384,8 @@ func (om *OutputManager) clearReaction(topic *TopicOutput) {
 func (om *OutputManager) flushText(topic *TopicOutput) {
 	text := topic.textBuffer
 	topic.textBuffer = ""
+	topic.draftID = ""
+	topic.draftTooLong = false
 
 	if text == "" {
 		return
@@ -377,6 +398,27 @@ func (om *OutputManager) flushText(topic *TopicOutput) {
 	topic.lastTextMsgID = msgID
 	topic.lastTextContent = html
 	topic.lastTextMode = "HTML"
+}
+
+// streamDraft pushes a throttled sendMessageDraft for the current text block.
+// Drafts with the same draftID animate in-place; flushText finalizes via sendMessage.
+func (om *OutputManager) streamDraft(topic *TopicOutput) {
+	if topic.draftID == "" || topic.draftTooLong {
+		return
+	}
+	now := time.Now()
+	if now.Sub(topic.lastDraftAt) < draftStreamInterval {
+		return
+	}
+
+	html := render.Telegram(topic.textBuffer)
+	if utf8.RuneCountInString(html) > maxMessageLen {
+		topic.draftTooLong = true
+		return
+	}
+
+	topic.lastDraftAt = now
+	om.sender.SendDraft(topic.threadID, topic.draftID, html, "HTML")
 }
 
 // buildToolHTML builds the blockquote HTML for a tool call.

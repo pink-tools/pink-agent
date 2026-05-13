@@ -1,165 +1,66 @@
 package telegram
 
 import (
-	"encoding/json"
-	"fmt"
+	"context"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
 )
 
-// Forum API helpers via MakeRequest (library lacks native support).
+// Thin helpers over go-telegram/bot that hide chatID and produce values
+// in the shapes pink-agent uses.
 
-func CreateForumTopic(api *tgbotapi.BotAPI, chatID int64, name string) (int, error) {
-	params := tgbotapi.Params{}
-	params.AddNonZero64("chat_id", chatID)
-	params["name"] = name
-
-	resp, err := api.MakeRequest("createForumTopic", params)
+func CreateForumTopic(ctx context.Context, api *bot.Bot, chatID int64, name string) (int, error) {
+	topic, err := api.CreateForumTopic(ctx, &bot.CreateForumTopicParams{
+		ChatID: chatID,
+		Name:   name,
+	})
 	if err != nil {
 		return 0, err
 	}
-
-	var result struct {
-		MessageThreadID int `json:"message_thread_id"`
-	}
-	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		return 0, err
-	}
-	return result.MessageThreadID, nil
+	return topic.MessageThreadID, nil
 }
 
-func CloseForumTopic(api *tgbotapi.BotAPI, chatID int64, threadID int) error {
-	params := tgbotapi.Params{}
-	params.AddNonZero64("chat_id", chatID)
-	params.AddNonZero("message_thread_id", threadID)
-	_, err := api.MakeRequest("closeForumTopic", params)
+func DeleteForumTopic(ctx context.Context, api *bot.Bot, chatID int64, threadID int) error {
+	_, err := api.DeleteForumTopic(ctx, &bot.DeleteForumTopicParams{
+		ChatID:          chatID,
+		MessageThreadID: threadID,
+	})
 	return err
 }
 
-func ReopenForumTopic(api *tgbotapi.BotAPI, chatID int64, threadID int) error {
-	params := tgbotapi.Params{}
-	params.AddNonZero64("chat_id", chatID)
-	params.AddNonZero("message_thread_id", threadID)
-	_, err := api.MakeRequest("reopenForumTopic", params)
-	return err
-}
-
-func EditForumTopic(api *tgbotapi.BotAPI, chatID int64, threadID int, name string) error {
-	params := tgbotapi.Params{}
-	params.AddNonZero64("chat_id", chatID)
-	params.AddNonZero("message_thread_id", threadID)
-	params["name"] = name
-	_, err := api.MakeRequest("editForumTopic", params)
-	return err
-}
-
-func DeleteForumTopic(api *tgbotapi.BotAPI, chatID int64, threadID int) error {
-	params := tgbotapi.Params{}
-	params.AddNonZero64("chat_id", chatID)
-	params.AddNonZero("message_thread_id", threadID)
-	_, err := api.MakeRequest("deleteForumTopic", params)
-	return err
-}
-
-// SendToThread sends a text message to a forum topic.
-func SendToThread(api *tgbotapi.BotAPI, chatID int64, threadID int, text, parseMode string, replyMarkup any) (int, error) {
-	params := tgbotapi.Params{}
-	params.AddNonZero64("chat_id", chatID)
-	params.AddNonZero("message_thread_id", threadID)
-	params["text"] = text
-	if parseMode != "" {
-		params["parse_mode"] = parseMode
+func SetReaction(ctx context.Context, api *bot.Bot, chatID int64, messageID int, emoji string) {
+	params := &bot.SetMessageReactionParams{
+		ChatID:    chatID,
+		MessageID: messageID,
 	}
-	if replyMarkup != nil {
-		data, err := json.Marshal(replyMarkup)
-		if err != nil {
-			return 0, err
-		}
-		params["reply_markup"] = string(data)
-	}
-
-	resp, err := api.MakeRequest("sendMessage", params)
-	if err != nil {
-		return 0, err
-	}
-
-	var result struct {
-		MessageID int `json:"message_id"`
-	}
-	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		return 0, err
-	}
-	return result.MessageID, nil
-}
-
-// EditMessage edits a message's text.
-func EditMessage(api *tgbotapi.BotAPI, chatID int64, messageID int, text, parseMode string, replyMarkup any) error {
-	params := tgbotapi.Params{}
-	params.AddNonZero64("chat_id", chatID)
-	params.AddNonZero("message_id", messageID)
-	params["text"] = text
-	if parseMode != "" {
-		params["parse_mode"] = parseMode
-	}
-	if replyMarkup != nil {
-		data, err := json.Marshal(replyMarkup)
-		if err != nil {
-			return err
-		}
-		params["reply_markup"] = string(data)
-	}
-
-	_, err := api.MakeRequest("editMessageText", params)
-	return err
-}
-
-// DeleteMessage deletes a message.
-func DeleteMessage(api *tgbotapi.BotAPI, chatID int64, messageID int) error {
-	params := tgbotapi.Params{}
-	params.AddNonZero64("chat_id", chatID)
-	params.AddNonZero("message_id", messageID)
-	_, err := api.MakeRequest("deleteMessage", params)
-	return err
-}
-
-// SetReaction sets or clears a reaction on a message.
-func SetReaction(api *tgbotapi.BotAPI, chatID int64, messageID int, emoji string) {
-	params := tgbotapi.Params{}
-	params.AddNonZero64("chat_id", chatID)
-	params.AddNonZero("message_id", messageID)
-
 	if emoji != "" {
-		params.AddInterface("reaction", []map[string]any{
-			{"type": "emoji", "emoji": emoji},
-		})
+		params.Reaction = []models.ReactionType{
+			{
+				Type:              models.ReactionTypeTypeEmoji,
+				ReactionTypeEmoji: &models.ReactionTypeEmoji{Emoji: emoji},
+			},
+		}
 	} else {
-		params.AddInterface("reaction", []map[string]any{})
+		params.Reaction = []models.ReactionType{}
 	}
-	api.MakeRequest("setMessageReaction", params)
+	api.SetMessageReaction(ctx, params)
 }
 
-// SetBotCommands registers /stop command for the group chat.
-func SetBotCommands(api *tgbotapi.BotAPI, chatID int64) {
-	commands, _ := json.Marshal([]map[string]string{
-		{"command": "stop", "description": "Stop Claude"},
-		{"command": "store", "description": "List project files"},
+func SetBotCommands(ctx context.Context, api *bot.Bot, chatID int64) {
+	api.SetMyCommands(ctx, &bot.SetMyCommandsParams{
+		Commands: []models.BotCommand{
+			{Command: "stop", Description: "Stop Claude"},
+			{Command: "store", Description: "List project files"},
+		},
+		Scope: &models.BotCommandScopeChat{ChatID: chatID},
 	})
-	scope, _ := json.Marshal(map[string]any{
-		"type":    "chat",
-		"chat_id": fmt.Sprintf("%d", chatID),
-	})
-
-	params := tgbotapi.Params{}
-	params["commands"] = string(commands)
-	params["scope"] = string(scope)
-	api.MakeRequest("setMyCommands", params)
 }
 
-// SendChatAction sends a chat action (e.g. "typing") to a forum topic.
-func SendChatAction(api *tgbotapi.BotAPI, chatID int64, threadID int, action string) {
-	params := tgbotapi.Params{}
-	params.AddNonZero64("chat_id", chatID)
-	params.AddNonZero("message_thread_id", threadID)
-	params["action"] = action
-	api.MakeRequest("sendChatAction", params)
+func SendChatAction(ctx context.Context, api *bot.Bot, chatID int64, threadID int, action models.ChatAction) {
+	api.SendChatAction(ctx, &bot.SendChatActionParams{
+		ChatID:          chatID,
+		MessageThreadID: threadID,
+		Action:          action,
+	})
 }
